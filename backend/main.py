@@ -11,6 +11,22 @@ import uuid
 import requests
 from bs4 import BeautifulSoup
 import logging
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
+
+# ... остальные импорты ...
+
+app = FastAPI(title="Neuro-Seller API", version="1.0.0")
+
+# Добавьте ЭТИ СТРОКИ:
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+def read_root():
+    # Вернуть HTML вместо JSON
+    return FileResponse("static/index.html")
+
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
