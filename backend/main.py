@@ -6,6 +6,7 @@ import os
 from openai import OpenAI
 from prompts import META_AGENT_PROMPT, generate_seller_prompt
 import re
+import uuid
 
 app = FastAPI(title="Neuro-Seller API", version="1.0.0")
 
@@ -22,7 +23,8 @@ app.add_middleware(
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Хранилище диалогов (в памяти, для MVP)
-conversations = {}
+conversations = {}  # user_id -> conversation data
+agents = {}  # agent_id -> agent data
 
 # Модели данных
 class Message(BaseModel):
@@ -68,7 +70,8 @@ def constructor_chat(data: Message):
     if user_id not in conversations:
         conversations[user_id] = {
             "history": [],
-            "agent_data": {}
+            "agent_data": {},
+            "agent_id": None
         }
     
     # Добавляем сообщение пользователя в историю
@@ -103,7 +106,20 @@ def constructor_chat(data: Message):
         if "[AGENT_READY]" in assistant_message:
             # Извлекаем данные агента из тегов
             agent_data = extract_agent_data(assistant_message)
+            
+            # Генерируем уникальный agent_id
+            agent_id = str(uuid.uuid4())
+            
+            # Сохраняем связь user_id -> agent_id
             conversations[user_id]["agent_data"] = agent_data
+            conversations[user_id]["agent_id"] = agent_id
+            
+            # Сохраняем агента в отдельное хранилище
+            agents[agent_id] = {
+                "agent_data": agent_data,
+                "test_history": [],
+                "created_by": user_id
+            }
             
             # УБИРАЕМ ТЕГИ ИЗ ТЕКСТА ДЛЯ ПОЛЬЗОВАТЕЛЯ
             clean_message = remove_tags(assistant_message)
@@ -111,6 +127,7 @@ def constructor_chat(data: Message):
             return {
                 "response": clean_message,
                 "status": "agent_ready",
+                "agent_id": agent_id,  # ← Base44 получит этот ID
                 "agent_data": agent_data
             }
         
@@ -129,15 +146,19 @@ def test_agent(data: AgentTest):
     agent_id = data.agent_id
     message = data.message
     
-    # Получаем данные агента из conversations
-    # (в реальной версии — из БД)
-    if agent_id not in conversations:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    
-    agent_data = conversations[agent_id].get("agent_data", {})
-    
-    if not agent_data:
-        raise HTTPException(status_code=400, detail="Agent not finalized")
+    # Проверяем наличие агента
+    if agent_id not in agents:
+        # Fallback: пытаемся найти по user_id (для обратной совместимости)
+        if agent_id in conversations and conversations[agent_id].get("agent_data"):
+            agent_data = conversations[agent_id]["agent_data"]
+            if "test_history" not in conversations[agent_id]:
+                conversations[agent_id]["test_history"] = []
+            test_history = conversations[agent_id]["test_history"]
+        else:
+            raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
+    else:
+        agent_data = agents[agent_id]["agent_data"]
+        test_history = agents[agent_id]["test_history"]
     
     # Генерируем промпт продавца
     seller_prompt = generate_seller_prompt(
@@ -146,18 +167,15 @@ def test_agent(data: AgentTest):
         knowledge_base=agent_data.get("knowledge_base", "")
     )
     
-    # Инициализация истории тестирования
-    if "test_history" not in conversations[agent_id]:
-        conversations[agent_id]["test_history"] = []
-    
-    conversations[agent_id]["test_history"].append({
+    # Добавляем сообщение пользователя
+    test_history.append({
         "role": "user",
         "content": message
     })
     
     messages = [
         {"role": "system", "content": seller_prompt}
-    ] + conversations[agent_id]["test_history"]
+    ] + test_history
     
     try:
         response = client.chat.completions.create(
@@ -169,14 +187,16 @@ def test_agent(data: AgentTest):
         
         assistant_message = response.choices[0].message.content
         
-        conversations[agent_id]["test_history"].append({
+        # Сохраняем ответ в историю
+        test_history.append({
             "role": "assistant",
             "content": assistant_message
         })
         
         return {
             "response": assistant_message,
-            "agent_name": agent_data.get("agent_name", "Виктория")
+            "agent_name": agent_data.get("agent_name", "Виктория"),
+            "status": "success"
         }
         
     except Exception as e:
@@ -188,13 +208,10 @@ def save_agent(data: AgentSave):
     
     agent_id = data.agent_id
     
-    if agent_id not in conversations:
+    if agent_id not in agents:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    agent_data = conversations[agent_id].get("agent_data", {})
-    
-    if not agent_data:
-        raise HTTPException(status_code=400, detail="Agent not finalized")
+    agent_data = agents[agent_id]["agent_data"]
     
     # В реальной версии: сохранение в БД
     # Сейчас просто возвращаем подтверждение
