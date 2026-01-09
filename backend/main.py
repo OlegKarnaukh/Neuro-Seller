@@ -5,6 +5,7 @@ from typing import List, Optional
 import os
 from openai import OpenAI
 from prompts import META_AGENT_PROMPT, generate_seller_prompt
+from database import Database
 import re
 import uuid
 import requests
@@ -24,9 +25,12 @@ app.add_middleware(
 # OpenAI клиент
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Хранилище диалогов (в памяти, для MVP)
+# База данных
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./agents.db")
+db = Database(DATABASE_URL)
+
+# Временное хранилище для конструктора
 conversations = {}
-agents = {}
 
 # Модели данных
 class Message(BaseModel):
@@ -41,6 +45,16 @@ class AgentTest(BaseModel):
 class AgentSave(BaseModel):
     agent_id: str
 
+class AgentUpdate(BaseModel):
+    agent_id: str
+    agent_data: dict
+
+@app.on_event("startup")
+async def startup():
+    """Инициализация БД при запуске"""
+    await db.init_db()
+    print("✅ Database initialized")
+
 @app.get("/")
 def read_root():
     return {
@@ -49,7 +63,9 @@ def read_root():
             "health": "/health",
             "constructor": "/api/constructor-chat",
             "test_agent": "/api/test-agent",
-            "save_agent": "/api/save-agent"
+            "save_agent": "/api/save-agent",
+            "get_agents": "/api/agents/{user_id}",
+            "update_status": "/api/update-agent-status"
         }
     }
 
@@ -58,7 +74,8 @@ def health_check():
     return {
         "status": "ok",
         "service": "neuro-seller-api",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "database": "connected"
     }
 
 @app.post("/api/constructor-chat")
@@ -69,62 +86,46 @@ def constructor_chat(data: Message):
     message = data.message
     files = data.files
     
-    # Инициализация истории диалога
+    # Инициализация истории
     if user_id not in conversations:
         conversations[user_id] = {
             "history": [],
             "agent_data": {},
-            "agent_id": None,
-            "collected_info": {
-                "business_type": "",
-                "services": [],
-                "website_content": "",
-                "objections": []
-            }
+            "agent_id": None
         }
     
-    collected = conversations[user_id]["collected_info"]
-    
-    # Обработка файлов (если есть)
+    # Обработка файлов
     if files:
         for file_url in files:
             try:
                 file_content = extract_file_content(file_url)
-                collected["services"].append(f"Из файла: {file_content}")
-            except Exception as e:
+                message += f"\n\n[СИСТЕМА: Содержимое файла:\n{file_content[:1000]}...]"
+            except:
                 pass
     
-    # Обработка ссылок в сообщении
+    # Обработка ссылок
     urls = extract_urls(message)
-    website_info = ""
-    
     if urls:
         for url in urls:
             try:
                 site_content = parse_website(url)
-                collected["website_content"] = site_content
-                website_info = f"\n\n[СИСТЕМА: Изучил сайт {url}. Содержимое:\n{site_content[:1000]}...]"
+                message += f"\n\n[СИСТЕМА: Изучил сайт {url}. Содержимое:\n{site_content[:1000]}...]"
             except Exception as e:
-                website_info = f"\n\n[СИСТЕМА: Ошибка чтения сайта {url}: {str(e)}]"
+                message += f"\n\n[СИСТЕМА: Ошибка чтения сайта {url}]"
     
-    # Добавляем информацию о сайте к сообщению пользователя
-    user_message_with_context = message
-    if website_info:
-        user_message_with_context += website_info
-    
-    # Добавляем сообщение в историю
+    # Добавляем в историю
     conversations[user_id]["history"].append({
         "role": "user",
-        "content": user_message_with_context
+        "content": message
     })
     
-    # Формируем контекст для OpenAI
+    # Контекст для OpenAI
     messages = [
         {"role": "system", "content": META_AGENT_PROMPT}
     ] + conversations[user_id]["history"]
     
     try:
-        # Вызов OpenAI API
+        # Вызов OpenAI
         response = client.chat.completions.create(
             model="gpt-4",
             messages=messages,
@@ -134,32 +135,38 @@ def constructor_chat(data: Message):
         
         assistant_message = response.choices[0].message.content
         
-        # Добавляем ответ ассистента в историю
         conversations[user_id]["history"].append({
             "role": "assistant",
             "content": assistant_message
         })
         
-        # Проверка на наличие тегов финализации
+        # Проверка финализации
         if "[AGENT_READY]" in assistant_message:
-            # Извлекаем данные агента из тегов
+            # Извлекаем данные
             agent_data = extract_agent_data(assistant_message)
             
-            # Генерируем уникальный agent_id
-            agent_id = str(uuid.uuid4())
+            # Генерируем промпт продавца
+            seller_prompt = generate_seller_prompt(
+                agent_name=agent_data.get("agent_name", "Виктория"),
+                business_type=agent_data.get("business_type", ""),
+                knowledge_base=agent_data.get("knowledge_base", "")
+            )
             
-            # Сохраняем связь
+            # СОХРАНЯЕМ В БАЗУ ДАННЫХ (асинхронно)
+            import asyncio
+            agent_id = asyncio.run(db.create_agent(
+                user_id=user_id,
+                agent_name=agent_data.get("agent_name", ""),
+                business_type=agent_data.get("business_type", ""),
+                knowledge_base=agent_data.get("knowledge_base", ""),
+                system_prompt=seller_prompt
+            ))
+            
+            # Очищаем временное хранилище
             conversations[user_id]["agent_data"] = agent_data
             conversations[user_id]["agent_id"] = agent_id
             
-            # Сохраняем агента
-            agents[agent_id] = {
-                "agent_data": agent_data,
-                "test_history": [],
-                "created_by": user_id
-            }
-            
-            # УБИРАЕМ ВСЕ ТЕГИ ИЗ ТЕКСТА
+            # Убираем теги
             clean_message = remove_tags(assistant_message)
             
             return {
@@ -178,37 +185,31 @@ def constructor_chat(data: Message):
         raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
 
 @app.post("/api/test-agent")
-def test_agent(data: AgentTest):
-    """Тестирование созданного агента"""
+async def test_agent(data: AgentTest):
+    """Тестирование агента"""
     
     agent_id = data.agent_id
     message = data.message
     
-    if agent_id in agents:
-        agent_data = agents[agent_id]["agent_data"]
-        test_history = agents[agent_id]["test_history"]
-    elif agent_id in conversations and conversations[agent_id].get("agent_data"):
-        agent_data = conversations[agent_id]["agent_data"]
-        if "test_history" not in conversations[agent_id]:
-            conversations[agent_id]["test_history"] = []
-        test_history = conversations[agent_id]["test_history"]
-    else:
+    # ПОЛУЧАЕМ АГЕНТА ИЗ БАЗЫ ДАННЫХ
+    agent = await db.get_agent(agent_id)
+    
+    if not agent:
         raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
     
-    seller_prompt = generate_seller_prompt(
-        agent_name=agent_data.get("agent_name", "Виктория"),
-        business_type=agent_data.get("business_type", ""),
-        knowledge_base=agent_data.get("knowledge_base", "")
-    )
+    # Инициализируем историю тестирования (в памяти для MVP)
+    if agent_id not in conversations:
+        conversations[agent_id] = {"test_history": []}
     
-    test_history.append({
+    conversations[agent_id]["test_history"].append({
         "role": "user",
         "content": message
     })
     
+    # Формируем контекст
     messages = [
-        {"role": "system", "content": seller_prompt}
-    ] + test_history
+        {"role": "system", "content": agent["system_prompt"]}
+    ] + conversations[agent_id]["test_history"]
     
     try:
         response = client.chat.completions.create(
@@ -220,14 +221,21 @@ def test_agent(data: AgentTest):
         
         assistant_message = response.choices[0].message.content
         
-        test_history.append({
+        conversations[agent_id]["test_history"].append({
             "role": "assistant",
             "content": assistant_message
         })
         
+        # Сохраняем в БД (асинхронно)
+        await db.save_conversation(
+            agent_id=agent_id,
+            channel="preview",
+            messages=conversations[agent_id]["test_history"]
+        )
+        
         return {
             "response": assistant_message,
-            "agent_name": agent_data.get("agent_name", "Виктория"),
+            "agent_name": agent["agent_name"],
             "status": "success"
         }
         
@@ -235,22 +243,60 @@ def test_agent(data: AgentTest):
         raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
 
 @app.post("/api/save-agent")
-def save_agent(data: AgentSave):
-    """Сохранение финализированного агента"""
+async def save_agent(data: AgentSave):
+    """Сохранение агента (обновление статуса на active)"""
     
     agent_id = data.agent_id
     
-    if agent_id not in agents:
+    agent = await db.get_agent(agent_id)
+    
+    if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    agent_data = agents[agent_id]["agent_data"]
+    # Обновляем статус
+    await db.update_agent_status(agent_id, "active")
     
     return {
         "status": "success",
-        "message": "Agent saved successfully",
+        "message": "Agent activated successfully",
         "agent_id": agent_id,
-        "agent_data": agent_data
+        "agent_data": {
+            "agent_name": agent["agent_name"],
+            "business_type": agent["business_type"],
+            "knowledge_base": agent["knowledge_base"]
+        }
     }
+
+@app.get("/api/agents/{user_id}")
+async def get_user_agents(user_id: str):
+    """Получить всех агентов пользователя"""
+    
+    agents = await db.get_user_agents(user_id)
+    
+    return {
+        "status": "success",
+        "count": len(agents),
+        "agents": agents
+    }
+
+@app.post("/api/update-agent-status")
+async def update_agent_status(data: dict):
+    """Обновить статус агента"""
+    
+    agent_id = data.get("agent_id")
+    status = data.get("status")
+    
+    if not agent_id or not status:
+        raise HTTPException(status_code=400, detail="agent_id and status required")
+    
+    await db.update_agent_status(agent_id, status)
+    
+    return {
+        "status": "success",
+        "message": f"Agent status updated to {status}"
+    }
+
+# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 
 def extract_agent_data(message: str) -> dict:
     """Извлекает данные агента из финального сообщения"""
@@ -275,30 +321,15 @@ def extract_agent_data(message: str) -> dict:
     return agent_data
 
 def remove_tags(message: str) -> str:
-    """Убирает ВСЕ технические теги из сообщения"""
+    """Убирает технические теги"""
     
-    # Удаляем все возможные варианты тегов
     clean = message
-    
-    # Вариант 1: [AGENT_READY]
     clean = re.sub(r'\[AGENT_READY\]', '', clean, flags=re.IGNORECASE)
-    
-    # Вариант 2: [AGENT_NAME: ...]
     clean = re.sub(r'\[AGENT_NAME:.*?\]', '', clean, flags=re.IGNORECASE)
-    
-    # Вариант 3: [BUSINESS_TYPE: ...]
     clean = re.sub(r'\[BUSINESS_TYPE:.*?\]', '', clean, flags=re.IGNORECASE)
-    
-    # Вариант 4: [KNOWLEDGE_BASE: ...]
-    clean = re.sub(r'\[KNOWLEDGE_BASE:.*?\]', '', clean, flags=re.IGNORECASE)
-    
-    # Вариант 5: [ТЕГИ: ...]
+    clean = re.sub(r'\[KNOWLEDGE_BASE:.*?\]', '', clean, flags=re.IGNORECASE | re.DOTALL)
     clean = re.sub(r'\[ТЕГИ:.*?\]', '', clean, flags=re.IGNORECASE | re.DOTALL)
-    
-    # Вариант 6: Любые теги в квадратных скобках с "AGENT", "BUSINESS", "KNOWLEDGE"
     clean = re.sub(r'\[.*?(AGENT|BUSINESS|KNOWLEDGE|ТЕГ).*?\]', '', clean, flags=re.IGNORECASE | re.DOTALL)
-    
-    # Убираем лишние пустые строки
     clean = re.sub(r'\n{3,}', '\n\n', clean)
     
     return clean.strip()
@@ -309,7 +340,7 @@ def extract_urls(text: str) -> List[str]:
     return re.findall(url_pattern, text)
 
 def parse_website(url: str) -> str:
-    """Парсит сайт и извлекает текстовую информацию"""
+    """Парсит сайт"""
     
     try:
         headers = {
@@ -320,23 +351,18 @@ def parse_website(url: str) -> str:
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Удаляем скрипты, стили, навигацию
         for element in soup(["script", "style", "nav", "footer", "header"]):
             element.decompose()
         
-        # Извлекаем текст
         text = soup.get_text()
-        
-        # Очищаем текст
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         text = '\n'.join(chunk for chunk in chunks if chunk)
         
-        # Ограничиваем длину
         return text[:4000]
         
     except Exception as e:
-        raise Exception(f"Ошибка парсинга сайта: {str(e)}")
+        raise Exception(f"Ошибка парсинга: {str(e)}")
 
 def extract_file_content(file_url: str) -> str:
     """Извлекает содержимое файла"""
