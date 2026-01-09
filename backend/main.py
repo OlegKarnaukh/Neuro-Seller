@@ -10,6 +10,11 @@ import re
 import uuid
 import requests
 from bs4 import BeautifulSoup
+import logging
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Neuro-Seller API", version="1.0.0")
 
@@ -45,27 +50,24 @@ class AgentTest(BaseModel):
 class AgentSave(BaseModel):
     agent_id: str
 
-class AgentUpdate(BaseModel):
-    agent_id: str
-    agent_data: dict
-
 @app.on_event("startup")
 async def startup():
     """Инициализация БД при запуске"""
     await db.init_db()
-    print("✅ Database initialized")
+    logger.info("✅ Database initialized")
+    logger.info(f"📝 META_AGENT_PROMPT version: {META_AGENT_PROMPT[:100]}...")
 
 @app.get("/")
 def read_root():
     return {
         "message": "Neuro-Seller API is running! 🚀",
+        "version": "2.0",
         "endpoints": {
             "health": "/health",
             "constructor": "/api/constructor-chat",
             "test_agent": "/api/test-agent",
             "save_agent": "/api/save-agent",
-            "get_agents": "/api/agents/{user_id}",
-            "update_status": "/api/update-agent-status"
+            "get_agents": "/api/agents/{user_id}"
         }
     }
 
@@ -74,7 +76,7 @@ def health_check():
     return {
         "status": "ok",
         "service": "neuro-seller-api",
-        "version": "1.0.0",
+        "version": "2.0",
         "database": "connected"
     }
 
@@ -86,6 +88,8 @@ def constructor_chat(data: Message):
     message = data.message
     files = data.files
     
+    logger.info(f"📩 Constructor chat: user_id={user_id}, message={message[:100]}")
+    
     # Инициализация истории
     if user_id not in conversations:
         conversations[user_id] = {
@@ -96,28 +100,36 @@ def constructor_chat(data: Message):
     
     # Обработка файлов
     if files:
+        logger.info(f"📎 Processing {len(files)} files")
         for file_url in files:
             try:
                 file_content = extract_file_content(file_url)
                 message += f"\n\n[СИСТЕМА: Содержимое файла:\n{file_content[:1000]}...]"
-            except:
-                pass
+                logger.info(f"✅ File processed: {file_url[:50]}")
+            except Exception as e:
+                logger.error(f"❌ File error: {e}")
     
     # Обработка ссылок
     urls = extract_urls(message)
     if urls:
+        logger.info(f"🔗 Found {len(urls)} URLs: {urls}")
         for url in urls:
             try:
+                logger.info(f"🌐 Parsing website: {url}")
                 site_content = parse_website(url)
-                message += f"\n\n[СИСТЕМА: Изучил сайт {url}. Содержимое:\n{site_content[:1000]}...]"
+                message += f"\n\n[СИСТЕМА: Изучил сайт {url}. Содержимое:\n{site_content[:2000]}...]"
+                logger.info(f"✅ Website parsed successfully. Content length: {len(site_content)}")
             except Exception as e:
-                message += f"\n\n[СИСТЕМА: Ошибка чтения сайта {url}]"
+                logger.error(f"❌ Website parse error: {e}")
+                message += f"\n\n[СИСТЕМА: Ошибка чтения сайта {url}: {str(e)}]"
     
     # Добавляем в историю
     conversations[user_id]["history"].append({
         "role": "user",
         "content": message
     })
+    
+    logger.info(f"📊 History length: {len(conversations[user_id]['history'])}")
     
     # Контекст для OpenAI
     messages = [
@@ -126,6 +138,7 @@ def constructor_chat(data: Message):
     
     try:
         # Вызов OpenAI
+        logger.info("🤖 Calling OpenAI API...")
         response = client.chat.completions.create(
             model="gpt-4",
             messages=messages,
@@ -134,6 +147,8 @@ def constructor_chat(data: Message):
         )
         
         assistant_message = response.choices[0].message.content
+        logger.info(f"✅ OpenAI response received. Length: {len(assistant_message)}")
+        logger.info(f"📝 Response preview: {assistant_message[:200]}")
         
         conversations[user_id]["history"].append({
             "role": "assistant",
@@ -142,8 +157,11 @@ def constructor_chat(data: Message):
         
         # Проверка финализации
         if "[AGENT_READY]" in assistant_message:
+            logger.info("🎉 Agent ready! Extracting data...")
+            
             # Извлекаем данные
             agent_data = extract_agent_data(assistant_message)
+            logger.info(f"📊 Extracted agent_data: {agent_data}")
             
             # Генерируем промпт продавца
             seller_prompt = generate_seller_prompt(
@@ -152,7 +170,10 @@ def constructor_chat(data: Message):
                 knowledge_base=agent_data.get("knowledge_base", "")
             )
             
-            # СОХРАНЯЕМ В БАЗУ ДАННЫХ (асинхронно)
+            logger.info(f"📝 Generated seller_prompt length: {len(seller_prompt)}")
+            logger.info(f"📝 Seller prompt preview: {seller_prompt[:300]}")
+            
+            # СОХРАНЯЕМ В БАЗУ ДАННЫХ
             import asyncio
             agent_id = asyncio.run(db.create_agent(
                 user_id=user_id,
@@ -162,7 +183,8 @@ def constructor_chat(data: Message):
                 system_prompt=seller_prompt
             ))
             
-            # Очищаем временное хранилище
+            logger.info(f"💾 Agent saved to DB: {agent_id}")
+            
             conversations[user_id]["agent_data"] = agent_data
             conversations[user_id]["agent_id"] = agent_id
             
@@ -182,6 +204,7 @@ def constructor_chat(data: Message):
         }
         
     except Exception as e:
+        logger.error(f"❌ OpenAI API error: {e}")
         raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
 
 @app.post("/api/test-agent")
@@ -191,13 +214,19 @@ async def test_agent(data: AgentTest):
     agent_id = data.agent_id
     message = data.message
     
+    logger.info(f"🧪 Testing agent: {agent_id}, message: {message[:100]}")
+    
     # ПОЛУЧАЕМ АГЕНТА ИЗ БАЗЫ ДАННЫХ
     agent = await db.get_agent(agent_id)
     
     if not agent:
+        logger.error(f"❌ Agent not found: {agent_id}")
         raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
     
-    # Инициализируем историю тестирования (в памяти для MVP)
+    logger.info(f"✅ Agent loaded: {agent['agent_name']}")
+    logger.info(f"📝 System prompt preview: {agent['system_prompt'][:300]}")
+    
+    # Инициализируем историю тестирования
     if agent_id not in conversations:
         conversations[agent_id] = {"test_history": []}
     
@@ -212,6 +241,7 @@ async def test_agent(data: AgentTest):
     ] + conversations[agent_id]["test_history"]
     
     try:
+        logger.info("🤖 Calling OpenAI for agent test...")
         response = client.chat.completions.create(
             model="gpt-4",
             messages=messages,
@@ -220,13 +250,14 @@ async def test_agent(data: AgentTest):
         )
         
         assistant_message = response.choices[0].message.content
+        logger.info(f"✅ Agent response: {assistant_message[:200]}")
         
         conversations[agent_id]["test_history"].append({
             "role": "assistant",
             "content": assistant_message
         })
         
-        # Сохраняем в БД (асинхронно)
+        # Сохраняем в БД
         await db.save_conversation(
             agent_id=agent_id,
             channel="preview",
@@ -240,11 +271,12 @@ async def test_agent(data: AgentTest):
         }
         
     except Exception as e:
+        logger.error(f"❌ OpenAI API error during test: {e}")
         raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
 
 @app.post("/api/save-agent")
 async def save_agent(data: AgentSave):
-    """Сохранение агента (обновление статуса на active)"""
+    """Сохранение агента"""
     
     agent_id = data.agent_id
     
@@ -253,18 +285,14 @@ async def save_agent(data: AgentSave):
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    # Обновляем статус
     await db.update_agent_status(agent_id, "active")
+    
+    logger.info(f"✅ Agent activated: {agent_id}")
     
     return {
         "status": "success",
         "message": "Agent activated successfully",
-        "agent_id": agent_id,
-        "agent_data": {
-            "agent_name": agent["agent_name"],
-            "business_type": agent["business_type"],
-            "knowledge_base": agent["knowledge_base"]
-        }
+        "agent_id": agent_id
     }
 
 @app.get("/api/agents/{user_id}")
@@ -279,27 +307,10 @@ async def get_user_agents(user_id: str):
         "agents": agents
     }
 
-@app.post("/api/update-agent-status")
-async def update_agent_status(data: dict):
-    """Обновить статус агента"""
-    
-    agent_id = data.get("agent_id")
-    status = data.get("status")
-    
-    if not agent_id or not status:
-        raise HTTPException(status_code=400, detail="agent_id and status required")
-    
-    await db.update_agent_status(agent_id, status)
-    
-    return {
-        "status": "success",
-        "message": f"Agent status updated to {status}"
-    }
-
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 
 def extract_agent_data(message: str) -> dict:
-    """Извлекает данные агента из финального сообщения"""
+    """Извлекает данные агента"""
     
     agent_data = {}
     
@@ -321,7 +332,7 @@ def extract_agent_data(message: str) -> dict:
     return agent_data
 
 def remove_tags(message: str) -> str:
-    """Убирает технические теги"""
+    """Убирает теги"""
     
     clean = message
     clean = re.sub(r'\[AGENT_READY\]', '', clean, flags=re.IGNORECASE)
@@ -335,7 +346,7 @@ def remove_tags(message: str) -> str:
     return clean.strip()
 
 def extract_urls(text: str) -> List[str]:
-    """Извлекает URL из текста"""
+    """Извлекает URL"""
     url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
     return re.findall(url_pattern, text)
 
@@ -344,7 +355,7 @@ def parse_website(url: str) -> str:
     
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
