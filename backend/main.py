@@ -25,8 +25,8 @@ app.add_middleware(
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Хранилище диалогов (в памяти, для MVP)
-conversations = {}  # user_id -> conversation data
-agents = {}  # agent_id -> agent data
+conversations = {}
+agents = {}
 
 # Модели данных
 class Message(BaseModel):
@@ -75,41 +75,50 @@ def constructor_chat(data: Message):
             "history": [],
             "agent_data": {},
             "agent_id": None,
-            "extracted_info": ""
+            "collected_info": {
+                "business_type": "",
+                "services": [],
+                "website_content": "",
+                "objections": []
+            }
         }
+    
+    collected = conversations[user_id]["collected_info"]
     
     # Обработка файлов (если есть)
     if files:
         for file_url in files:
             try:
                 file_content = extract_file_content(file_url)
-                conversations[user_id]["extracted_info"] += f"\n\nИнформация из файла:\n{file_content}"
+                collected["services"].append(f"Из файла: {file_content}")
             except Exception as e:
-                conversations[user_id]["extracted_info"] += f"\n\n[Ошибка чтения файла: {str(e)}]"
+                pass
     
     # Обработка ссылок в сообщении
     urls = extract_urls(message)
+    website_info = ""
+    
     if urls:
         for url in urls:
             try:
                 site_content = parse_website(url)
-                conversations[user_id]["extracted_info"] += f"\n\nИнформация с сайта {url}:\n{site_content}"
-                message += f"\n\n[Система: Я изучил сайт {url}]"
+                collected["website_content"] = site_content
+                website_info = f"\n\n[СИСТЕМА: Изучил сайт {url}. Содержимое:\n{site_content[:1000]}...]"
             except Exception as e:
-                message += f"\n\n[Система: Не удалось прочитать сайт {url}: {str(e)}]"
+                website_info = f"\n\n[СИСТЕМА: Ошибка чтения сайта {url}: {str(e)}]"
     
-    # Добавляем дополнительную информацию к сообщению
-    if conversations[user_id]["extracted_info"]:
-        message += conversations[user_id]["extracted_info"]
-        conversations[user_id]["extracted_info"] = ""  # Очищаем после использования
+    # Добавляем информацию о сайте к сообщению пользователя
+    user_message_with_context = message
+    if website_info:
+        user_message_with_context += website_info
     
-    # Добавляем сообщение пользователя в историю
+    # Добавляем сообщение в историю
     conversations[user_id]["history"].append({
         "role": "user",
-        "content": message
+        "content": user_message_with_context
     })
     
-    # Формируем полный контекст для OpenAI
+    # Формируем контекст для OpenAI
     messages = [
         {"role": "system", "content": META_AGENT_PROMPT}
     ] + conversations[user_id]["history"]
@@ -120,7 +129,7 @@ def constructor_chat(data: Message):
             model="gpt-4",
             messages=messages,
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=1200
         )
         
         assistant_message = response.choices[0].message.content
@@ -139,18 +148,18 @@ def constructor_chat(data: Message):
             # Генерируем уникальный agent_id
             agent_id = str(uuid.uuid4())
             
-            # Сохраняем связь user_id -> agent_id
+            # Сохраняем связь
             conversations[user_id]["agent_data"] = agent_data
             conversations[user_id]["agent_id"] = agent_id
             
-            # Сохраняем агента в отдельное хранилище
+            # Сохраняем агента
             agents[agent_id] = {
                 "agent_data": agent_data,
                 "test_history": [],
                 "created_by": user_id
             }
             
-            # УБИРАЕМ ТЕГИ ИЗ ТЕКСТА ДЛЯ ПОЛЬЗОВАТЕЛЯ
+            # УБИРАЕМ ВСЕ ТЕГИ ИЗ ТЕКСТА
             clean_message = remove_tags(assistant_message)
             
             return {
@@ -175,7 +184,6 @@ def test_agent(data: AgentTest):
     agent_id = data.agent_id
     message = data.message
     
-    # Проверяем наличие агента
     if agent_id in agents:
         agent_data = agents[agent_id]["agent_data"]
         test_history = agents[agent_id]["test_history"]
@@ -185,19 +193,14 @@ def test_agent(data: AgentTest):
             conversations[agent_id]["test_history"] = []
         test_history = conversations[agent_id]["test_history"]
     else:
-        raise HTTPException(
-            status_code=404, 
-            detail=f"Agent not found: {agent_id}"
-        )
+        raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
     
-    # Генерируем промпт продавца
     seller_prompt = generate_seller_prompt(
         agent_name=agent_data.get("agent_name", "Виктория"),
         business_type=agent_data.get("business_type", ""),
         knowledge_base=agent_data.get("knowledge_base", "")
     )
     
-    # Добавляем сообщение пользователя
     test_history.append({
         "role": "user",
         "content": message
@@ -217,7 +220,6 @@ def test_agent(data: AgentTest):
         
         assistant_message = response.choices[0].message.content
         
-        # Сохраняем ответ в историю
         test_history.append({
             "role": "assistant",
             "content": assistant_message
@@ -273,12 +275,30 @@ def extract_agent_data(message: str) -> dict:
     return agent_data
 
 def remove_tags(message: str) -> str:
-    """Убирает технические теги из сообщения"""
+    """Убирает ВСЕ технические теги из сообщения"""
     
-    clean = re.sub(r'\[AGENT_READY\]', '', message)
-    clean = re.sub(r'\[AGENT_NAME:.*?\]', '', clean)
-    clean = re.sub(r'\[BUSINESS_TYPE:.*?\]', '', clean)
-    clean = re.sub(r'\[KNOWLEDGE_BASE:.*?\]', '', clean)
+    # Удаляем все возможные варианты тегов
+    clean = message
+    
+    # Вариант 1: [AGENT_READY]
+    clean = re.sub(r'\[AGENT_READY\]', '', clean, flags=re.IGNORECASE)
+    
+    # Вариант 2: [AGENT_NAME: ...]
+    clean = re.sub(r'\[AGENT_NAME:.*?\]', '', clean, flags=re.IGNORECASE)
+    
+    # Вариант 3: [BUSINESS_TYPE: ...]
+    clean = re.sub(r'\[BUSINESS_TYPE:.*?\]', '', clean, flags=re.IGNORECASE)
+    
+    # Вариант 4: [KNOWLEDGE_BASE: ...]
+    clean = re.sub(r'\[KNOWLEDGE_BASE:.*?\]', '', clean, flags=re.IGNORECASE)
+    
+    # Вариант 5: [ТЕГИ: ...]
+    clean = re.sub(r'\[ТЕГИ:.*?\]', '', clean, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Вариант 6: Любые теги в квадратных скобках с "AGENT", "BUSINESS", "KNOWLEDGE"
+    clean = re.sub(r'\[.*?(AGENT|BUSINESS|KNOWLEDGE|ТЕГ).*?\]', '', clean, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Убираем лишние пустые строки
     clean = re.sub(r'\n{3,}', '\n\n', clean)
     
     return clean.strip()
@@ -293,16 +313,16 @@ def parse_website(url: str) -> str:
     
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Удаляем скрипты и стили
-        for script in soup(["script", "style"]):
-            script.decompose()
+        # Удаляем скрипты, стили, навигацию
+        for element in soup(["script", "style", "nav", "footer", "header"]):
+            element.decompose()
         
         # Извлекаем текст
         text = soup.get_text()
@@ -313,7 +333,7 @@ def parse_website(url: str) -> str:
         text = '\n'.join(chunk for chunk in chunks if chunk)
         
         # Ограничиваем длину
-        return text[:3000]
+        return text[:4000]
         
     except Exception as e:
         raise Exception(f"Ошибка парсинга сайта: {str(e)}")
@@ -325,16 +345,12 @@ def extract_file_content(file_url: str) -> str:
         response = requests.get(file_url, timeout=10)
         response.raise_for_status()
         
-        # Определяем тип файла
         content_type = response.headers.get('Content-Type', '')
         
         if 'text' in content_type or 'json' in content_type:
             return response.text[:3000]
-        elif 'pdf' in content_type:
-            # Для PDF нужна библиотека PyPDF2 или pdfplumber
-            return "[PDF файл - содержимое будет добавлено после установки библиотеки]"
         else:
-            return f"[Файл типа {content_type} - содержимое не может быть прочитано]"
+            return f"[Файл типа {content_type}]"
             
     except Exception as e:
         raise Exception(f"Ошибка чтения файла: {str(e)}")
