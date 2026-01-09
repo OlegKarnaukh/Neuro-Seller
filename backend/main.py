@@ -5,7 +5,7 @@ from typing import List, Optional
 import os
 from openai import OpenAI
 from prompts import META_AGENT_PROMPT, generate_seller_prompt
-import json
+import re
 
 app = FastAPI(title="Neuro-Seller API", version="1.0.0")
 
@@ -105,8 +105,11 @@ def constructor_chat(data: Message):
             agent_data = extract_agent_data(assistant_message)
             conversations[user_id]["agent_data"] = agent_data
             
+            # УБИРАЕМ ТЕГИ ИЗ ТЕКСТА ДЛЯ ПОЛЬЗОВАТЕЛЯ
+            clean_message = remove_tags(assistant_message)
+            
             return {
-                "response": assistant_message,
+                "response": clean_message,
                 "status": "agent_ready",
                 "agent_data": agent_data
             }
@@ -227,3 +230,17 @@ def extract_agent_data(message: str) -> dict:
         agent_data["knowledge_base"] = message[start:end].strip()
     
     return agent_data
+
+def remove_tags(message: str) -> str:
+    """Убирает технические теги из сообщения"""
+    
+    # Удаляем все теги в квадратных скобках
+    clean = re.sub(r'\[AGENT_READY\]', '', message)
+    clean = re.sub(r'\[AGENT_NAME:.*?\]', '', clean)
+    clean = re.sub(r'\[BUSINESS_TYPE:.*?\]', '', clean)
+    clean = re.sub(r'\[KNOWLEDGE_BASE:.*?\]', '', clean)
+    
+    # Убираем лишние пустые строки
+    clean = re.sub(r'\n{3,}', '\n\n', clean)
+    
+    return clean.strip()
