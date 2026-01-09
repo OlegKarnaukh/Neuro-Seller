@@ -1,113 +1,229 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import List, Optional
 import os
-from dotenv import load_dotenv
+from openai import OpenAI
+from prompts import META_AGENT_PROMPT, generate_seller_prompt
+import json
 
-from ai_client import AIClient
-from agents import AgentManager
-from database import Database
-
-load_dotenv()
-
-app = FastAPI(title="Нейропродавец API", version="1.0.0")
+app = FastAPI(title="Neuro-Seller API", version="1.0.0")
 
 # CORS для Base44
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://app.base44.com", "https://*.base44.com", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Инициализация
-db = Database(os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./neuro_seller.db"))
-agent_manager = AgentManager(db)
+# OpenAI клиент
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Хранилище диалогов (в памяти, для MVP)
+conversations = {}
 
 # Модели данных
-class ConstructorMessage(BaseModel):
+class Message(BaseModel):
     user_id: str
     message: str
-    files: Optional[List[str]] = []
+    files: List[str] = []
 
-class TestAgentMessage(BaseModel):
+class AgentTest(BaseModel):
     agent_id: str
     message: str
 
-class SaveAgentRequest(BaseModel):
+class AgentSave(BaseModel):
     agent_id: str
 
-# Startup
-@app.on_event("startup")
-async def startup():
-    """Инициализация БД при запуске"""
-    await db.init_db()
-    print("✅ Database initialized")
-
-# API Endpoints
-@app.post("/api/constructor-chat")
-async def constructor_chat(data: ConstructorMessage):
-    """Диалог с конструктором агента"""
-    try:
-        result = await agent_manager.handle_constructor_message(
-            user_id=data.user_id,
-            message=data.message,
-            files=data.files
-        )
-        return result
-    except Exception as e:
-        print(f"❌ Error in constructor_chat: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/test-agent")
-async def test_agent(data: TestAgentMessage):
-    """Тестирование созданного агента"""
-    try:
-        result = await agent_manager.test_agent(
-            agent_id=data.agent_id,
-            message=data.message
-        )
-        return result
-    except Exception as e:
-        print(f"❌ Error in test_agent: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/save-agent")
-async def save_agent(data: SaveAgentRequest):
-    """Сохранение и активация агента"""
-    try:
-        result = await agent_manager.save_agent(data.agent_id)
-        return result
-    except Exception as e:
-        print(f"❌ Error in save_agent: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/agents/{user_id}")
-async def get_user_agents(user_id: str):
-    """Получить все агенты пользователя"""
-    try:
-        agents = await agent_manager.get_user_agents(user_id)
-        return {"agents": agents}
-    except Exception as e:
-        print(f"❌ Error in get_user_agents: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/health")
-async def health_check():
-    """Проверка работоспособности"""
-    return {"status": "ok", "service": "neuro-seller-api", "version": "1.0.0"}
-
 @app.get("/")
-async def root():
-    """Корневой маршрут"""
+def read_root():
     return {
-        "message": "Нейропродавец API",
-        "docs": "/docs",
-        "health": "/health"
+        "message": "Neuro-Seller API is running! 🚀",
+        "endpoints": {
+            "health": "/health",
+            "constructor": "/api/constructor-chat",
+            "test_agent": "/api/test-agent",
+            "save_agent": "/api/save-agent"
+        }
     }
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+@app.get("/health")
+def health_check():
+    return {
+        "status": "ok",
+        "service": "neuro-seller-api",
+        "version": "1.0.0"
+    }
+
+@app.post("/api/constructor-chat")
+def constructor_chat(data: Message):
+    """Конструктор агента - диалог с мета-агентом"""
+    
+    user_id = data.user_id
+    message = data.message
+    
+    # Инициализация истории диалога
+    if user_id not in conversations:
+        conversations[user_id] = {
+            "history": [],
+            "agent_data": {}
+        }
+    
+    # Добавляем сообщение пользователя в историю
+    conversations[user_id]["history"].append({
+        "role": "user",
+        "content": message
+    })
+    
+    # Формируем полный контекст для OpenAI
+    messages = [
+        {"role": "system", "content": META_AGENT_PROMPT}
+    ] + conversations[user_id]["history"]
+    
+    try:
+        # Вызов OpenAI API
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=800
+        )
+        
+        assistant_message = response.choices[0].message.content
+        
+        # Добавляем ответ ассистента в историю
+        conversations[user_id]["history"].append({
+            "role": "assistant",
+            "content": assistant_message
+        })
+        
+        # Проверка на наличие тегов финализации
+        if "[AGENT_READY]" in assistant_message:
+            # Извлекаем данные агента из тегов
+            agent_data = extract_agent_data(assistant_message)
+            conversations[user_id]["agent_data"] = agent_data
+            
+            return {
+                "response": assistant_message,
+                "status": "agent_ready",
+                "agent_data": agent_data
+            }
+        
+        return {
+            "response": assistant_message,
+            "status": "in_progress"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+
+@app.post("/api/test-agent")
+def test_agent(data: AgentTest):
+    """Тестирование созданного агента"""
+    
+    agent_id = data.agent_id
+    message = data.message
+    
+    # Получаем данные агента из conversations
+    # (в реальной версии — из БД)
+    if agent_id not in conversations:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    agent_data = conversations[agent_id].get("agent_data", {})
+    
+    if not agent_data:
+        raise HTTPException(status_code=400, detail="Agent not finalized")
+    
+    # Генерируем промпт продавца
+    seller_prompt = generate_seller_prompt(
+        agent_name=agent_data.get("agent_name", "Виктория"),
+        business_type=agent_data.get("business_type", ""),
+        knowledge_base=agent_data.get("knowledge_base", "")
+    )
+    
+    # Инициализация истории тестирования
+    if "test_history" not in conversations[agent_id]:
+        conversations[agent_id]["test_history"] = []
+    
+    conversations[agent_id]["test_history"].append({
+        "role": "user",
+        "content": message
+    })
+    
+    messages = [
+        {"role": "system", "content": seller_prompt}
+    ] + conversations[agent_id]["test_history"]
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=500
+        )
+        
+        assistant_message = response.choices[0].message.content
+        
+        conversations[agent_id]["test_history"].append({
+            "role": "assistant",
+            "content": assistant_message
+        })
+        
+        return {
+            "response": assistant_message,
+            "agent_name": agent_data.get("agent_name", "Виктория")
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+
+@app.post("/api/save-agent")
+def save_agent(data: AgentSave):
+    """Сохранение финализированного агента"""
+    
+    agent_id = data.agent_id
+    
+    if agent_id not in conversations:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    agent_data = conversations[agent_id].get("agent_data", {})
+    
+    if not agent_data:
+        raise HTTPException(status_code=400, detail="Agent not finalized")
+    
+    # В реальной версии: сохранение в БД
+    # Сейчас просто возвращаем подтверждение
+    
+    return {
+        "status": "success",
+        "message": "Agent saved successfully",
+        "agent_id": agent_id,
+        "agent_data": agent_data
+    }
+
+def extract_agent_data(message: str) -> dict:
+    """Извлекает данные агента из финального сообщения"""
+    
+    agent_data = {}
+    
+    # Извлечение AGENT_NAME
+    if "[AGENT_NAME:" in message:
+        start = message.find("[AGENT_NAME:") + len("[AGENT_NAME:")
+        end = message.find("]", start)
+        agent_data["agent_name"] = message[start:end].strip()
+    
+    # Извлечение BUSINESS_TYPE
+    if "[BUSINESS_TYPE:" in message:
+        start = message.find("[BUSINESS_TYPE:") + len("[BUSINESS_TYPE:")
+        end = message.find("]", start)
+        agent_data["business_type"] = message[start:end].strip()
+    
+    # Извлечение KNOWLEDGE_BASE
+    if "[KNOWLEDGE_BASE:" in message:
+        start = message.find("[KNOWLEDGE_BASE:") + len("[KNOWLEDGE_BASE:")
+        end = message.find("]", start)
+        agent_data["knowledge_base"] = message[start:end].strip()
+    
+    return agent_data
