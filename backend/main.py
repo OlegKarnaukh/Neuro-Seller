@@ -7,6 +7,8 @@ from openai import OpenAI
 from prompts import META_AGENT_PROMPT, generate_seller_prompt
 import re
 import uuid
+import requests
+from bs4 import BeautifulSoup
 
 app = FastAPI(title="Neuro-Seller API", version="1.0.0")
 
@@ -65,14 +67,41 @@ def constructor_chat(data: Message):
     
     user_id = data.user_id
     message = data.message
+    files = data.files
     
     # Инициализация истории диалога
     if user_id not in conversations:
         conversations[user_id] = {
             "history": [],
             "agent_data": {},
-            "agent_id": None
+            "agent_id": None,
+            "extracted_info": ""
         }
+    
+    # Обработка файлов (если есть)
+    if files:
+        for file_url in files:
+            try:
+                file_content = extract_file_content(file_url)
+                conversations[user_id]["extracted_info"] += f"\n\nИнформация из файла:\n{file_content}"
+            except Exception as e:
+                conversations[user_id]["extracted_info"] += f"\n\n[Ошибка чтения файла: {str(e)}]"
+    
+    # Обработка ссылок в сообщении
+    urls = extract_urls(message)
+    if urls:
+        for url in urls:
+            try:
+                site_content = parse_website(url)
+                conversations[user_id]["extracted_info"] += f"\n\nИнформация с сайта {url}:\n{site_content}"
+                message += f"\n\n[Система: Я изучил сайт {url}]"
+            except Exception as e:
+                message += f"\n\n[Система: Не удалось прочитать сайт {url}: {str(e)}]"
+    
+    # Добавляем дополнительную информацию к сообщению
+    if conversations[user_id]["extracted_info"]:
+        message += conversations[user_id]["extracted_info"]
+        conversations[user_id]["extracted_info"] = ""  # Очищаем после использования
     
     # Добавляем сообщение пользователя в историю
     conversations[user_id]["history"].append({
@@ -91,7 +120,7 @@ def constructor_chat(data: Message):
             model="gpt-4",
             messages=messages,
             temperature=0.7,
-            max_tokens=800
+            max_tokens=1000
         )
         
         assistant_message = response.choices[0].message.content
@@ -127,7 +156,7 @@ def constructor_chat(data: Message):
             return {
                 "response": clean_message,
                 "status": "agent_ready",
-                "agent_id": agent_id,  # ← Base44 получит этот ID
+                "agent_id": agent_id,
                 "agent_data": agent_data
             }
         
@@ -147,18 +176,19 @@ def test_agent(data: AgentTest):
     message = data.message
     
     # Проверяем наличие агента
-    if agent_id not in agents:
-        # Fallback: пытаемся найти по user_id (для обратной совместимости)
-        if agent_id in conversations and conversations[agent_id].get("agent_data"):
-            agent_data = conversations[agent_id]["agent_data"]
-            if "test_history" not in conversations[agent_id]:
-                conversations[agent_id]["test_history"] = []
-            test_history = conversations[agent_id]["test_history"]
-        else:
-            raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
-    else:
+    if agent_id in agents:
         agent_data = agents[agent_id]["agent_data"]
         test_history = agents[agent_id]["test_history"]
+    elif agent_id in conversations and conversations[agent_id].get("agent_data"):
+        agent_data = conversations[agent_id]["agent_data"]
+        if "test_history" not in conversations[agent_id]:
+            conversations[agent_id]["test_history"] = []
+        test_history = conversations[agent_id]["test_history"]
+    else:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Agent not found: {agent_id}"
+        )
     
     # Генерируем промпт продавца
     seller_prompt = generate_seller_prompt(
@@ -213,9 +243,6 @@ def save_agent(data: AgentSave):
     
     agent_data = agents[agent_id]["agent_data"]
     
-    # В реальной версии: сохранение в БД
-    # Сейчас просто возвращаем подтверждение
-    
     return {
         "status": "success",
         "message": "Agent saved successfully",
@@ -228,19 +255,16 @@ def extract_agent_data(message: str) -> dict:
     
     agent_data = {}
     
-    # Извлечение AGENT_NAME
     if "[AGENT_NAME:" in message:
         start = message.find("[AGENT_NAME:") + len("[AGENT_NAME:")
         end = message.find("]", start)
         agent_data["agent_name"] = message[start:end].strip()
     
-    # Извлечение BUSINESS_TYPE
     if "[BUSINESS_TYPE:" in message:
         start = message.find("[BUSINESS_TYPE:") + len("[BUSINESS_TYPE:")
         end = message.find("]", start)
         agent_data["business_type"] = message[start:end].strip()
     
-    # Извлечение KNOWLEDGE_BASE
     if "[KNOWLEDGE_BASE:" in message:
         start = message.find("[KNOWLEDGE_BASE:") + len("[KNOWLEDGE_BASE:")
         end = message.find("]", start)
@@ -251,13 +275,66 @@ def extract_agent_data(message: str) -> dict:
 def remove_tags(message: str) -> str:
     """Убирает технические теги из сообщения"""
     
-    # Удаляем все теги в квадратных скобках
     clean = re.sub(r'\[AGENT_READY\]', '', message)
     clean = re.sub(r'\[AGENT_NAME:.*?\]', '', clean)
     clean = re.sub(r'\[BUSINESS_TYPE:.*?\]', '', clean)
     clean = re.sub(r'\[KNOWLEDGE_BASE:.*?\]', '', clean)
-    
-    # Убираем лишние пустые строки
     clean = re.sub(r'\n{3,}', '\n\n', clean)
     
     return clean.strip()
+
+def extract_urls(text: str) -> List[str]:
+    """Извлекает URL из текста"""
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+    return re.findall(url_pattern, text)
+
+def parse_website(url: str) -> str:
+    """Парсит сайт и извлекает текстовую информацию"""
+    
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Удаляем скрипты и стили
+        for script in soup(["script", "style"]):
+            script.decompose()
+        
+        # Извлекаем текст
+        text = soup.get_text()
+        
+        # Очищаем текст
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        text = '\n'.join(chunk for chunk in chunks if chunk)
+        
+        # Ограничиваем длину
+        return text[:3000]
+        
+    except Exception as e:
+        raise Exception(f"Ошибка парсинга сайта: {str(e)}")
+
+def extract_file_content(file_url: str) -> str:
+    """Извлекает содержимое файла"""
+    
+    try:
+        response = requests.get(file_url, timeout=10)
+        response.raise_for_status()
+        
+        # Определяем тип файла
+        content_type = response.headers.get('Content-Type', '')
+        
+        if 'text' in content_type or 'json' in content_type:
+            return response.text[:3000]
+        elif 'pdf' in content_type:
+            # Для PDF нужна библиотека PyPDF2 или pdfplumber
+            return "[PDF файл - содержимое будет добавлено после установки библиотеки]"
+        else:
+            return f"[Файл типа {content_type} - содержимое не может быть прочитано]"
+            
+    except Exception as e:
+        raise Exception(f"Ошибка чтения файла: {str(e)}")
