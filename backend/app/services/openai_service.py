@@ -51,35 +51,46 @@ async def chat_completion(
 
 async def parse_agent_ready_response(response_text: str) -> Dict:
     """
-    Parse META_AGENT response for [AGENT_READY] tag and extract data.
+    Parse META_AGENT response for ---AGENT-READY--- tag and extract data.
     
     Returns:
         Dict with agent_name, business_type, knowledge_base or None
     """
-    if "[AGENT_READY]" not in response_text:
+    if "---AGENT-READY---" not in response_text:
         return None
     
-    # Extract data between tags
+    # Extract data between markers
     import re
     
-    agent_name_match = re.search(r'\[AGENT_NAME\]:\s*(.+)', response_text)
-    business_type_match = re.search(r'\[BUSINESS_TYPE\]:\s*(.+)', response_text)
-    knowledge_base_match = re.search(r'\[KNOWLEDGE_BASE\]:\s*(\{.+\})', response_text, re.DOTALL)
+    # Extract agent name
+    name_match = re.search(r'NAME:\s*(.+)', response_text)
+    # Extract business type
+    type_match = re.search(r'TYPE:\s*(.+)', response_text)
+    # Extract data
+    data_match = re.search(r'DATA:\s*(.+)', response_text)
     
-    if not (agent_name_match and business_type_match):
+    if not (name_match and type_match):
         return None
     
-    # Parse knowledge base JSON
+    agent_name = name_match.group(1).strip()
+    business_type = type_match.group(1).strip()
+    
+    # Parse data into knowledge_base
     knowledge_base = {}
-    if knowledge_base_match:
-        try:
-            import json
-            knowledge_base = json.loads(knowledge_base_match.group(1))
-        except:
-            pass
+    if data_match:
+        data_str = data_match.group(1).strip()
+        
+        # Try to extract structured info from text
+        # Look for website
+        website_match = re.search(r'(?:сайт|website)[:\s]+([^\s,]+)', data_str, re.IGNORECASE)
+        if website_match:
+            knowledge_base["website"] = website_match.group(1)
+        
+        # Extract everything as raw text for now
+        knowledge_base["raw_data"] = data_str
     
     return {
-        "agent_name": agent_name_match.group(1).strip(),
-        "business_type": business_type_match.group(1).strip(),
+        "agent_name": agent_name.lower(),
+        "business_type": business_type,
         "knowledge_base": knowledge_base
     }
