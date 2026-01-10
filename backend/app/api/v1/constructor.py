@@ -8,14 +8,15 @@ from typing import List, Dict, Optional
 import uuid
 import re
 from datetime import datetime
+import json
 
 from app.core.database import get_db
-from app.models.user import User
+from app.models.user import User, PlanType
 from app.models.agent import Agent
 from app.services.openai_service import chat_completion, parse_agent_ready_response
 from app.prompts import META_AGENT_PROMPT, generate_seller_prompt
 
-# Добавим импорты для парсинга
+# Импорты для парсинга сайтов
 import httpx
 from bs4 import BeautifulSoup
 
@@ -48,11 +49,17 @@ async def parse_website(url: str) -> Dict:
     Парсит сайт и извлекает информацию о бизнесе
     """
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            response = await client.get(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
             response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Удаляем скрипты и стили
+        for script in soup(["script", "style"]):
+            script.decompose()
         
         # Извлекаем текст
         text = soup.get_text(separator=' ', strip=True)
@@ -107,7 +114,7 @@ async def extract_info_from_website(url: str) -> Dict:
 4. Контакты (телефон, email, адрес)
 5. Краткое описание компании
 
-Верни результат в формате JSON:
+Верни результат СТРОГО в формате JSON:
 {{
   "business_type": "...",
   "services": ["...", "..."],
@@ -115,6 +122,8 @@ async def extract_info_from_website(url: str) -> Dict:
   "contacts": {{"phone": "...", "email": "...", "address": "..."}},
   "about": "..."
 }}
+
+ВАЖНО: Верни только JSON, без дополнительного текста.
 """
     
     try:
@@ -128,7 +137,6 @@ async def extract_info_from_website(url: str) -> Dict:
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
         
         if json_match:
-            import json
             extracted_data = json.loads(json_match.group(0))
             extracted_data["website"] = url
             return extracted_data
@@ -159,21 +167,46 @@ async def constructor_chat(
     try:
         user_id = request.user_id
         
-        # Проверяем пользователя
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # Проверяем/создаём пользователя
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         
+        user = db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            # Создаём нового пользователя автоматически
+            user = User(
+                id=user_id,
+                email=f"{user_id}@neuro-seller.local",
+                plan=PlanType.FREE,
+                credits_balance=1000,
+                status="active",
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            
+            print(f"✅ Created new user: {user_id}")
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # Загружаем историю диалога
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
         if user_id not in conversations:
             conversations[user_id] = []
         
         # Обрабатываем новые сообщения
         for msg in request.messages:
-            if msg.dict() not in conversations[user_id]:
-                conversations[user_id].append(msg.dict())
+            msg_dict = msg.dict()
+            if msg_dict not in conversations[user_id]:
+                conversations[user_id].append(msg_dict)
         
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # Проверяем наличие URL в последнем сообщении
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
         last_message = request.messages[-1].content if request.messages else ""
         url_pattern = r'https?://[^\s]+'
         urls = re.findall(url_pattern, last_message)
@@ -181,35 +214,65 @@ async def constructor_chat(
         # Если найден URL, парсим сайт
         if urls:
             url = urls[0]
+            print(f"🔍 Парсинг сайта: {url}")
+            
             website_data = await extract_info_from_website(url)
             
             # Добавляем информацию о сайте в контекст
             if "error" not in website_data:
-                site_info_message = f"""
-Информация с сайта {url}:
-- Тип бизнеса: {website_data.get('business_type', 'не определено')}
-- Услуги: {', '.join(website_data.get('services', []))}
-- Контакты: {website_data.get('contacts', {})}
-- О компании: {website_data.get('about', '')}
+                site_info_message = f"""[ИНФОРМАЦИЯ С САЙТА {url}]
+
+Тип бизнеса: {website_data.get('business_type', 'не определено')}
+
+Услуги/Товары:
+{', '.join(website_data.get('services', []))}
+
+Цены:
+{json.dumps(website_data.get('prices', {}), ensure_ascii=False, indent=2)}
+
+Контакты:
+{json.dumps(website_data.get('contacts', {}), ensure_ascii=False, indent=2)}
+
+О компании:
+{website_data.get('about', '')}
+
+[КОНЕЦ ИНФОРМАЦИИ С САЙТА]
 """
                 conversations[user_id].append({
                     "role": "system",
                     "content": site_info_message
                 })
+                
+                print(f"✅ Сайт успешно обработан")
+            else:
+                print(f"❌ Ошибка парсинга сайта: {website_data.get('error')}")
         
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # Формируем контекст для GPT
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
         messages = [
             {"role": "system", "content": META_AGENT_PROMPT}
         ] + conversations[user_id]
         
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # Запрос к OpenAI
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
         response = await chat_completion(messages=messages, temperature=0.7)
         response_text = response["content"]
         
+        print(f"📨 Ответ мета-агента: {response_text[:200]}...")
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # Проверяем, готов ли агент к созданию
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
         agent_data = parse_agent_ready_response(response_text)
         
         if agent_data:
+            print(f"🎉 Создаём агента: {agent_data}")
+            
             # Создаём агента
             agent_name = agent_data["agent_name"]
             business_type = agent_data["business_type"]
@@ -240,16 +303,21 @@ async def constructor_chat(
             db.commit()
             db.refresh(new_agent)
             
+            print(f"✅ Агент создан с ID: {new_agent.id}")
+            
             # Очищаем историю диалога
             conversations[user_id] = []
             
             return ConstructorChatResponse(
-                response=f"🎉 Агент '{agent_name.capitalize()}' успешно создан!\n\nТеперь вы можете протестировать его работу или подключить к каналам (Telegram, WhatsApp, VK).",
+                response=f"🎉 Агент '{agent_name.capitalize()}' успешно создан!\n\nID агента: {new_agent.id}\n\nТеперь вы можете протестировать его работу или подключить к каналам (Telegram, WhatsApp, VK).",
                 agent_created=True,
                 agent_id=new_agent.id
             )
         
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # Сохраняем ответ ассистента в историю
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
         conversations[user_id].append({
             "role": "assistant",
             "content": response_text
@@ -264,4 +332,5 @@ async def constructor_chat(
     except HTTPException:
         raise
     except Exception as e:
+        print(f"❌ Ошибка в constructor_chat: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
