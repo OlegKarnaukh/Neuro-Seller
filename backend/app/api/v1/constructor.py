@@ -17,7 +17,7 @@ sys.path.insert(0, '/app/backend')
 
 from app.core.database import get_db
 from app.models.agent import Agent
-from app.models.user import User, PlanType
+from app.models.user import User
 from app.prompts import META_AGENT_PROMPT, generate_seller_prompt
 from app.services.openai_service import chat_completion, parse_agent_ready_response
 
