@@ -117,67 +117,6 @@ def merge_knowledge_bases(existing: Dict, new: Dict) -> Dict:
     return merged
 
 
-def knowledge_base_to_string(kb: dict) -> str:
-    """
-    Конвертирует knowledge_base (словарь) в строку для промпта.
-    
-    ИСПРАВЛЕНО: проверяем тип полей перед использованием .get()
-    """
-    parts = []
-    
-    # Сайт
-    if kb.get("website"):
-        parts.append(f"**Сайт:** {kb['website']}")
-    
-    # Услуги
-    if kb.get("services"):
-        parts.append("**Услуги/Товары:**")
-        for service in kb["services"]:
-            name = service.get("name", "")
-            price = service.get("price", "")
-            parts.append(f"- {name} — {price}")
-    
-    # О бизнесе
-    if kb.get("about"):
-        parts.append(f"**О бизнесе:**\n{kb['about']}")
-    
-    # Контакты (ИСПРАВЛЕНО: проверяем тип)
-    if kb.get("contacts"):
-        contacts = kb["contacts"]
-        if isinstance(contacts, dict):
-            # Если contacts — словарь
-            contact_parts = []
-            if contacts.get("phone"):
-                contact_parts.append(f"Телефон: {contacts['phone']}")
-            if contacts.get("email"):
-                contact_parts.append(f"Email: {contacts['email']}")
-            if contacts.get("address"):
-                contact_parts.append(f"Адрес: {contacts['address']}")
-            if contact_parts:
-                parts.append("**Контакты:**\n" + "\n".join(contact_parts))
-        elif isinstance(contacts, str):
-            # Если contacts — строка
-            parts.append(f"**Контакты:**\n{contacts}")
-    
-    # Конкурентные преимущества
-    if kb.get("advantages"):
-        parts.append(f"**Конкурентные преимущества:**\n{kb['advantages']}")
-    
-    # Возражения
-    if kb.get("objections"):
-        parts.append(f"**Типичные возражения:**\n{kb['objections']}")
-    
-    # FAQ
-    if kb.get("faq"):
-        parts.append(f"**Частые вопросы:**\n{kb['faq']}")
-    
-    # Дополнительная информация
-    if kb.get("raw_data"):
-        parts.append(f"**Дополнительная информация:**\n{kb['raw_data']}")
-    
-    return "\n\n".join(parts)
-
-
 # Основной эндпоинт
 @router.post("/chat", response_model=ConstructorChatResponse)
 async def constructor_chat(
@@ -271,15 +210,15 @@ async def constructor_chat(
             business_type = agent_data["business_type"]
             kb_dict = agent_data["knowledge_base"]
             
-            # Конвертируем kb_dict в строку для system_prompt
-            kb_string = knowledge_base_to_string(kb_dict)
-            
-            # Генерируем system_prompt (3 параметра)
+            # Генерируем system_prompt (передаём kb_dict как словарь)
             system_prompt = generate_seller_prompt(
                 agent_name=agent_name,
                 business_type=business_type,
-                knowledge_base=kb_dict  # передаём словарь, внутри он конвертируется
+                knowledge_base=kb_dict
             )
+            
+            # Определяем персону (victoria или alexander)
+            persona_name = "victoria" if "виктория" in agent_name.lower() else "alexander"
             
             # Проверяем, есть ли уже агент у пользователя
             existing_agent = db.query(Agent).filter(
@@ -290,9 +229,11 @@ async def constructor_chat(
                 # Обновляем существующего агента
                 existing_agent.agent_name = agent_name
                 existing_agent.business_type = business_type
-                existing_agent.persona = system_prompt
-                existing_agent.knowledge_base = kb_dict  # сохраняем как dict
+                existing_agent.persona = persona_name  # ✅ короткое имя (victoria/alexander)
+                existing_agent.system_prompt = system_prompt  # ✅ длинный промпт
+                existing_agent.knowledge_base = kb_dict
                 existing_agent.status = "active"
+                existing_agent.updated_at = datetime.utcnow()
                 db.commit()
                 
                 logger.info(f"✅ Агент обновлён! ID: {existing_agent.id}")
@@ -306,14 +247,16 @@ async def constructor_chat(
             else:
                 # Создаём нового агента
                 new_agent = Agent(
-                    id=str(uuid4()),
+                    id=uuid4(),
                     user_id=user_id,
                     agent_name=agent_name,
                     business_type=business_type,
-                    persona=system_prompt,
-                    knowledge_base=kb_dict,  # сохраняем как dict
+                    persona=persona_name,  # ✅ короткое имя (victoria/alexander)
+                    system_prompt=system_prompt,  # ✅ длинный промпт
+                    knowledge_base=kb_dict,
                     status="active",
-                    created_at=datetime.utcnow()
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow()
                 )
                 db.add(new_agent)
                 db.commit()
