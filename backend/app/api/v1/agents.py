@@ -2,7 +2,7 @@
 Agents API - CRUD operations for seller agents
 """
 import logging
-from uuid import UUID
+from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, field_serializer
@@ -13,6 +13,7 @@ from app.core.database import get_db
 from app.models.agent import Agent
 from app.models.user import User
 from app.services.openai_service import chat_completion
+from app.prompts import generate_seller_prompt
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -38,6 +39,16 @@ class AgentResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+
+class CreateAgentRequest(BaseModel):
+    user_id: str
+    agent_name: str
+    business_type: str
+    knowledge_base: Optional[Dict[str, Any]] = None
+    avatar_url: Optional[str] = None
+    persona: Optional[str] = None  # "victoria" или "alexander"
+    status: Optional[str] = "draft"  # draft, active, archived
 
 
 class UpdateAgentRequest(BaseModel):
@@ -67,6 +78,94 @@ class ChatResponse(BaseModel):
     agent_id: str
     agent_name: str
     response: str
+
+
+# Дефолтные аватарки по персонам
+DEFAULT_AVATARS = {
+    "victoria": "https://cdn.example.com/avatars/female-default.png",
+    "alexander": "https://cdn.example.com/avatars/male-default.png",
+}
+
+
+@router.post("/", response_model=AgentResponse)
+async def create_agent(
+    request: CreateAgentRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Создать агента вручную (без мета-агента).
+    
+    Requires:
+    - user_id: ID пользователя-владельца
+    - agent_name: Имя агента (например, "Виктория")
+    - business_type: Тип бизнеса (например, "Салон красоты")
+    
+    Optional:
+    - knowledge_base: База знаний в формате JSON
+    - avatar_url: URL аватарки
+    - persona: "victoria" или "alexander" (определяет стиль общения)
+    - status: "draft" (по умолчанию), "active", "archived"
+    """
+    try:
+        # Проверяем, что пользователь существует
+        user = db.query(User).filter(User.id == request.user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Определяем персону
+        persona = request.persona
+        if not persona:
+            # Автоопределение по имени агента
+            agent_name_lower = request.agent_name.lower()
+            if any(name in agent_name_lower for name in ["виктория", "victoria", "анна", "мария", "елена"]):
+                persona = "victoria"
+            else:
+                persona = "alexander"
+        
+        # Устанавливаем дефолтную аватарку, если не указана
+        avatar_url = request.avatar_url or DEFAULT_AVATARS.get(persona)
+        
+        # Генерируем system_prompt из базы знаний
+        knowledge_base = request.knowledge_base or {}
+        system_prompt = generate_seller_prompt(
+            agent_name=request.agent_name,
+            business_type=request.business_type,
+            knowledge_base=knowledge_base
+        )
+        
+        # Создаём агента
+        new_agent = Agent(
+            id=uuid4(),
+            user_id=request.user_id,
+            agent_name=request.agent_name,
+            business_type=request.business_type,
+            persona=persona,
+            knowledge_base=knowledge_base,
+            system_prompt=system_prompt,
+            avatar_url=avatar_url,
+            status=request.status or "draft",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
+        )
+        
+        db.add(new_agent)
+        db.commit()
+        db.refresh(new_agent)
+        
+        logger.info(f"✅ Агент '{new_agent.agent_name}' создан вручную (ID: {new_agent.id})")
+        logger.info(f"   user_id: {request.user_id}")
+        logger.info(f"   business_type: {request.business_type}")
+        logger.info(f"   persona: {persona}")
+        logger.info(f"   status: {request.status or 'draft'}")
+        
+        return new_agent
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Ошибка создания агента: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}")
 
 
 @router.get("/{user_id}", response_model=List[AgentResponse])
@@ -161,6 +260,8 @@ async def delete_agent(
     
     db.delete(agent)
     db.commit()
+    
+    logger.info(f"🗑️ Агент {agent.agent_name} (ID: {agent_id}) удалён")
     
     return {"message": "Agent deleted successfully"}
 
