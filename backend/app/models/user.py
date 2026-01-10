@@ -1,14 +1,14 @@
-from sqlalchemy import Column, String, DateTime, Integer
+from sqlalchemy import Column, String, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 from datetime import datetime
 import uuid
-from app.database import Base
+from app.core.database import Base
 
 class User(Base):
     __tablename__ = "users"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    telegram_id = Column(String, unique=True, nullable=True, index=True)  # ✅ Новое поле
+    telegram_id = Column(String, unique=True, nullable=True, index=True)
     plan = Column(String, default="free")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
