@@ -7,7 +7,7 @@ import json
 import sys
 from typing import Optional, Dict, Any, List
 from datetime import datetime
-from uuid import uuid4
+from uuid import uuid4, UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -48,28 +48,45 @@ class AgentData(BaseModel):
 
 class ConstructorChatResponse(BaseModel):
     """
-    Base44 Integration Response Format:
-    
-    Обычный ответ:
-    {
-      "response": "Текст ответа мета-агента"
-    }
-    
-    Агент готов:
-    {
-      "status": "agent_ready",
-      "agent_id": "uuid",
-      "agent_data": {
-        "agent_name": "Виктория",
-        "business_type": "Салон красоты",
-        "knowledge_base": {...}
-      }
-    }
+    Base44 Integration Response Format
     """
     response: Optional[str] = None
     status: Optional[str] = None
     agent_id: Optional[str] = None
     agent_data: Optional[AgentData] = None
+
+
+# ✅ Функция для форматирования user_id в валидный UUID
+def format_uuid(user_id: str) -> str:
+    """
+    Форматирует строку в валидный UUID формат.
+    
+    Примеры:
+    - "69611ae203d0641b357eee82" → "69611ae2-03d0-641b-357e-ee82xxxxxxxx"
+    - "550e8400e29b41d4a716446655440000" → "550e8400-e29b-41d4-a716-446655440000"
+    """
+    # Убираем все дефисы
+    clean_id = user_id.replace('-', '')
+    
+    # Если меньше 32 символов, дополняем нулями
+    if len(clean_id) < 32:
+        clean_id = clean_id.ljust(32, '0')
+    
+    # Если больше 32, обрезаем
+    if len(clean_id) > 32:
+        clean_id = clean_id[:32]
+    
+    # Форматируем в UUID: 8-4-4-4-12
+    formatted = f"{clean_id[0:8]}-{clean_id[8:12]}-{clean_id[12:16]}-{clean_id[16:20]}-{clean_id[20:32]}"
+    
+    try:
+        # Проверяем, что это валидный UUID
+        UUID(formatted)
+        return formatted
+    except ValueError:
+        # Если не получилось, генерируем новый
+        logger.warning(f"⚠️ Не удалось сформатировать UUID из '{user_id}', создаём новый")
+        return str(uuid4())
 
 
 # Вспомогательные функции
@@ -98,7 +115,7 @@ def extract_info_from_website(url: str) -> Dict[str, Any]:
 
 Если какая-то информация недоступна, используй пустую строку или пустой массив."""
 
-        response = chat_completion(
+        response = await chat_completion(
             messages=[{"role": "user", "content": prompt}],
             model="gpt-4o-mini",
             temperature=0.3
@@ -133,7 +150,11 @@ async def constructor_chat(
     - Выходной формат (обычный): {"response": "..."}
     """
     try:
-        user_id = request.user_id
+        # ✅ Форматируем user_id в валидный UUID
+        user_id_raw = request.user_id
+        user_id = format_uuid(user_id_raw)
+        
+        logger.info(f"📝 user_id получен: '{user_id_raw}' → форматирован: '{user_id}'")
         
         # Создаём пользователя, если не существует
         user = db.query(User).filter(User.id == user_id).first()
@@ -236,7 +257,7 @@ async def constructor_chat(
                 existing_agent.persona = persona_name
                 existing_agent.system_prompt = system_prompt
                 existing_agent.knowledge_base = kb_dict
-                existing_agent.status = "draft"  # ✅ draft до нажатия "Сохранить"
+                existing_agent.status = "draft"
                 existing_agent.updated_at = datetime.utcnow()
                 db.commit()
                 
@@ -262,7 +283,7 @@ async def constructor_chat(
                     persona=persona_name,
                     system_prompt=system_prompt,
                     knowledge_base=kb_dict,
-                    status="draft",  # ✅ draft до нажатия "Сохранить"
+                    status="draft",
                     created_at=datetime.utcnow(),
                     updated_at=datetime.utcnow()
                 )
