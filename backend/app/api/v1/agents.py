@@ -47,8 +47,8 @@ class CreateAgentRequest(BaseModel):
     business_type: str
     knowledge_base: Optional[Dict[str, Any]] = None
     avatar_url: Optional[str] = None
-    persona: Optional[str] = None  # "victoria" или "alexander"
-    status: Optional[str] = "draft"  # draft, active, archived
+    persona: Optional[str] = None
+    status: Optional[str] = "draft"
 
 
 class UpdateAgentRequest(BaseModel):
@@ -67,7 +67,16 @@ class TestAgentRequest(BaseModel):
 
 class TestAgentResponse(BaseModel):
     response: str
-    tokens_used: int
+    agent_name: str  # ✅ Добавлено для Base44
+
+
+class SaveAgentRequest(BaseModel):
+    agent_id: str
+
+
+class SaveAgentResponse(BaseModel):
+    success: bool
+    redirect_url: str
 
 
 class ChatRequest(BaseModel):
@@ -98,6 +107,10 @@ async def test_agent(
 ):
     """
     Test an agent with a message (for Preview in Base44).
+    
+    Base44 Integration:
+    - Request: {"agent_id": "...", "message": "..."}
+    - Response: {"response": "...", "agent_name": "Виктория"}
     """
     agent = db.query(Agent).filter(Agent.id == request.agent_id).first()
     
@@ -117,14 +130,56 @@ async def test_agent(
         # ASYNC call
         response = await chat_completion(messages=messages, temperature=0.8)
         
-        # chat_completion теперь возвращает просто строку, а не dict
+        # ✅ Возвращаем response + agent_name для Base44
         return TestAgentResponse(
             response=response,
-            tokens_used=0  # Токены можно добавить позже, если нужно
+            agent_name=agent.agent_name
         )
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OpenAI error: {str(e)}")
+
+
+@router.post("/save", response_model=SaveAgentResponse)
+async def save_agent(
+    request: SaveAgentRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Save agent (activate it) - for Base44 integration.
+    
+    Base44 Integration:
+    - Request: {"agent_id": "..."}
+    - Response: {"success": true, "redirect_url": "/dashboard"}
+    
+    Changes agent status from 'draft' to 'active'.
+    """
+    try:
+        agent = db.query(Agent).filter(Agent.id == request.agent_id).first()
+        
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Активируем агента
+        agent.status = "active"
+        agent.updated_at = datetime.utcnow()
+        
+        db.commit()
+        db.refresh(agent)
+        
+        logger.info(f"✅ Агент {agent.agent_name} (ID: {request.agent_id}) активирован")
+        
+        return SaveAgentResponse(
+            success=True,
+            redirect_url="/dashboard"
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Ошибка активации агента {request.agent_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to save agent: {str(e)}")
 
 
 @router.get("/detail/{agent_id}", response_model=AgentResponse)
@@ -212,17 +267,6 @@ async def create_agent(
 ):
     """
     Создать агента вручную (без мета-агента).
-    
-    Requires:
-    - user_id: ID пользователя-владельца
-    - agent_name: Имя агента (например, "Виктория")
-    - business_type: Тип бизнеса (например, "Салон красоты")
-    
-    Optional:
-    - knowledge_base: База знаний в формате JSON
-    - avatar_url: URL аватарки
-    - persona: "victoria" или "alexander" (определяет стиль общения)
-    - status: "draft" (по умолчанию), "active", "archived"
     """
     try:
         return await _create_agent_logic(request, db)
@@ -242,29 +286,18 @@ async def update_agent(
 ):
     """
     Update an agent's information.
-    
-    Allows updating:
-    - agent_name: Display name of the agent
-    - business_type: Type of business (e.g., "Салон красоты")
-    - system_prompt: Full system prompt with instructions
-    - knowledge_base: JSON object with business data
-    - avatar_url: URL to agent's avatar image
-    - status: Agent status (draft/active/archived)
     """
     try:
-        # Получаем агента из БД
         agent = db.query(Agent).filter(Agent.id == agent_id).first()
         
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         
-        # Обновляем только переданные поля
         update_data = request.dict(exclude_unset=True)
         
         for field, value in update_data.items():
             setattr(agent, field, value)
         
-        # Обновляем timestamp
         agent.updated_at = datetime.utcnow()
         
         db.commit()
@@ -312,12 +345,8 @@ async def chat_with_agent(
 ):
     """
     Chat with an agent-seller.
-    
-    The agent uses its system_prompt (containing business knowledge and persona)
-    to respond to customer messages.
     """
     try:
-        # Получаем агента из БД
         agent = db.query(Agent).filter(Agent.id == agent_id).first()
         
         if not agent:
@@ -335,7 +364,6 @@ async def chat_with_agent(
                 detail="Agent has no system prompt configured"
             )
         
-        # Формируем контекст для OpenAI
         messages = [
             {"role": "system", "content": agent.system_prompt},
             {"role": "user", "content": request.message}
@@ -344,7 +372,6 @@ async def chat_with_agent(
         logger.info(f"💬 Отправка сообщения агенту {agent.agent_name} (ID: {agent_id})")
         logger.info(f"📝 Сообщение пользователя: {request.message}")
         
-        # Отправляем запрос к OpenAI (ASYNC)
         response = await chat_completion(
             messages=messages,
             model="gpt-4o-mini",
@@ -360,7 +387,6 @@ async def chat_with_agent(
         )
     
     except HTTPException:
-        # Пробрасываем HTTP ошибки дальше
         raise
     except Exception as e:
         logger.error(f"❌ Ошибка в chat_with_agent: {e}", exc_info=True)
