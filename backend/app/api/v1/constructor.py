@@ -52,7 +52,7 @@ async def parse_website(url: str) -> Dict:
     """
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            response = await client.get(url, headers={
+            response = client.get(url, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
             response.raise_for_status()
@@ -94,7 +94,7 @@ async def extract_info_from_website(url: str) -> Dict:
     """
     Парсит сайт и использует GPT для извлечения структурированной информации
     """
-    parsed_data = await parse_website(url)
+    parsed_data = parse_website(url)
     
     if not parsed_data["success"]:
         return {"error": parsed_data["error"]}
@@ -129,7 +129,7 @@ async def extract_info_from_website(url: str) -> Dict:
 """
     
     try:
-        response = await chat_completion(
+        response = chat_completion(
             messages=[{"role": "user", "content": extraction_prompt}],
             temperature=0.3
         )
@@ -362,7 +362,7 @@ async def constructor_chat(
             url = urls[0]
             print(f"🔍 Парсинг сайта: {url}")
             
-            website_data = await extract_info_from_website(url)
+            website_data = extract_info_from_website(url)
             
             # Добавляем информацию о сайте в контекст
             if "error" not in website_data:
@@ -405,7 +405,8 @@ async def constructor_chat(
         # Запрос к OpenAI
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         
-        response = await chat_completion(messages=messages, temperature=0.7)
+        response = chat_completion(messages=messages, temperature=0.7)
+
         response_text = response["content"]
         
         print(f"📨 Ответ мета-агента: {response_text[:200]}...")
