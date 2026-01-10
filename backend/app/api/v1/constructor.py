@@ -18,14 +18,13 @@ sys.path.insert(0, '/app/backend')
 from app.core.database import get_db
 from app.models.agent import Agent
 from app.models.user import User
+from app.models.constructor_conversation import ConstructorConversation
 from app.prompts import META_AGENT_PROMPT, generate_seller_prompt
 from app.services.openai_service import chat_completion, parse_agent_ready_response
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-conversations: Dict[str, List[Dict[str, str]]] = {}
 
 
 # Pydantic модели
@@ -43,6 +42,8 @@ class AgentData(BaseModel):
     """Данные агента для Base44"""
     agent_name: str
     business_type: str
+    description: str  # ← Добавлено
+    instructions: str  # ← Добавлено
     knowledge_base: Dict[str, Any]
 
 
@@ -51,6 +52,11 @@ class ConstructorChatResponse(BaseModel):
     status: Optional[str] = None
     agent_id: Optional[str] = None
     agent_data: Optional[AgentData] = None
+
+
+class ConstructorHistoryResponse(BaseModel):
+    """История диалога с конструктором"""
+    messages: List[Message]
 
 
 def format_uuid(user_id: str) -> str:
@@ -86,6 +92,32 @@ def extract_info_from_website(url: str) -> Dict[str, Any]:
     return {}
 
 
+@router.get("/history/{user_id}", response_model=ConstructorHistoryResponse)
+async def get_constructor_history(
+    user_id: str,
+    db: Session = Depends(get_db)
+):
+    """Получить историю диалога с конструктором"""
+    try:
+        user_id = format_uuid(user_id)
+        
+        # Ищем последнюю сессию конструктора
+        conversation = db.query(ConstructorConversation).filter(
+            ConstructorConversation.user_id == user_id
+        ).order_by(ConstructorConversation.updated_at.desc()).first()
+        
+        if conversation:
+            messages = [Message(**msg) for msg in conversation.messages]
+            return ConstructorHistoryResponse(messages=messages)
+        
+        # Если истории нет, возвращаем пустой массив
+        return ConstructorHistoryResponse(messages=[])
+    
+    except Exception as e:
+        logger.error(f"❌ Ошибка при загрузке истории: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/chat", response_model=ConstructorChatResponse)
 async def constructor_chat(
     request: ConstructorChatRequest,
@@ -104,26 +136,29 @@ async def constructor_chat(
             logger.info(f"👤 Создаём нового пользователя: {user_id}")
             new_user = User(
                 id=user_id,
-                plan="free"  # ✅ Убрали telegram_id
+                plan="free"
             )
             db.add(new_user)
             db.commit()
             logger.info(f"✅ Пользователь создан: {user_id}")
 
+        # Загружаем или создаём сессию конструктора
+        conversation_record = db.query(ConstructorConversation).filter(
+            ConstructorConversation.user_id == user_id
+        ).order_by(ConstructorConversation.updated_at.desc()).first()
         
-        # История диалога
-        if user_id not in conversations:
-            conversations[user_id] = []
+        if not conversation_record:
+            conversation_record = ConstructorConversation(
+                id=uuid4(),
+                user_id=user_id,
+                messages=[],
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+            db.add(conversation_record)
         
-        conversation = conversations[user_id]
-        
-        # Добавляем новые сообщения
-        for msg in request.messages:
-            if not conversation or conversation[-1]["content"] != msg.content:
-                conversation.append({
-                    "role": msg.role,
-                    "content": msg.content
-                })
+        # Преобразуем request.messages в список словарей
+        conversation = [msg.dict() for msg in request.messages]
         
         # Парсим URL (временно отключено)
         last_user_message = None
@@ -150,11 +185,16 @@ async def constructor_chat(
             temperature=0.7
         )
         
-        # Добавляем ответ
+        # Добавляем ответ в историю
         conversation.append({
             "role": "assistant",
             "content": assistant_response
         })
+        
+        # Сохраняем историю в БД
+        conversation_record.messages = conversation
+        conversation_record.updated_at = datetime.utcnow()
+        db.commit()
         
         # Проверяем готовность агента
         agent_data = parse_agent_ready_response(assistant_response)
@@ -190,12 +230,18 @@ async def constructor_chat(
                 
                 logger.info(f"✅ Агент обновлён! ID: {existing_agent.id}")
                 
+                # Очищаем историю конструктора после создания агента
+                conversation_record.messages = []
+                db.commit()
+                
                 return ConstructorChatResponse(
                     status="agent_ready",
                     agent_id=str(existing_agent.id),
                     agent_data=AgentData(
                         agent_name=agent_name,
                         business_type=business_type,
+                        description=business_type,  # ← Добавлено
+                        instructions=system_prompt,  # ← Добавлено
                         knowledge_base=kb_dict
                     )
                 )
@@ -218,7 +264,9 @@ async def constructor_chat(
                 
                 logger.info(f"✅ Агент создан! ID: {new_agent.id}")
                 
-                conversations[user_id] = []
+                # Очищаем историю конструктора после создания агента
+                conversation_record.messages = []
+                db.commit()
                 
                 return ConstructorChatResponse(
                     status="agent_ready",
@@ -226,6 +274,8 @@ async def constructor_chat(
                     agent_data=AgentData(
                         agent_name=agent_name,
                         business_type=business_type,
+                        description=business_type,  # ← Добавлено
+                        instructions=system_prompt,  # ← Добавлено
                         knowledge_base=kb_dict
                     )
                 )
