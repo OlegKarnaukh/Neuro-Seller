@@ -10,10 +10,10 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 
-from app.database import get_db
-from app.models import User, Agent, PlanType
-from app.prompts import META_AGENT_PROMPT, generate_seller_prompt
-from app.services.openai_service import chat_completion, parse_agent_ready_response
+from database import get_db
+from models import User, Agent, PlanType
+from prompts import META_AGENT_PROMPT, generate_seller_prompt
+from services.openai_service import chat_completion, parse_agent_ready_response
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
