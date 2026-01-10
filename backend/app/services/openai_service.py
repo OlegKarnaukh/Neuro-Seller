@@ -52,19 +52,12 @@ def parse_agent_ready_response(response_text: str) -> Optional[Dict]:
     TYPE: Салон красоты
     DATA: {JSON с полной информацией}
     ---
-    
-    Или (без закрывающего тега):
-    ---AGENT-READY---
-    NAME: Виктория
-    TYPE: Салон красоты
-    DATA: {JSON}
-    
     """
     if "---AGENT-READY---" not in response_text:
         return None
     
     try:
-        # Извлекаем блок между ---AGENT-READY--- и --- (или до конца, если нет ---)
+        # Извлекаем блок между ---AGENT-READY--- и --- (или до конца)
         pattern = r"---AGENT-READY---(.*?)(?:---|$)"
         match = re.search(pattern, response_text, re.DOTALL)
         
@@ -76,26 +69,24 @@ def parse_agent_ready_response(response_text: str) -> Optional[Dict]:
         # Парсим поля
         agent_data = {}
         
-        # Извлекаем NAME
-        name_match = re.search(r"NAME:\s*(.+)", content)
+        # Извлекаем NAME (только до переноса строки)
+        name_match = re.search(r"NAME:\s*([^\n]+)", content)
         if name_match:
             agent_data["agent_name"] = name_match.group(1).strip().lower()
         
-        # Извлекаем TYPE
-        type_match = re.search(r"TYPE:\s*(.+)", content)
+        # Извлекаем TYPE (только до переноса строки)
+        type_match = re.search(r"TYPE:\s*([^\n]+)", content)
         if type_match:
             agent_data["business_type"] = type_match.group(1).strip()
         
-        # Извлекаем DATA (может быть JSON или текст)
+        # Извлекаем DATA (всё остальное)
         data_match = re.search(r"DATA:\s*(.+)", content, re.DOTALL)
         if data_match:
             data_str = data_match.group(1).strip()
             
-            # Убираем всё после JSON (если есть текст после)
-            # Ищем первый символ { и последний }
+            # Убираем текст после JSON
             json_start = data_str.find('{')
             if json_start != -1:
-                # Находим соответствующую закрывающую скобку
                 brace_count = 0
                 json_end = -1
                 for i in range(json_start, len(data_str)):
@@ -110,27 +101,36 @@ def parse_agent_ready_response(response_text: str) -> Optional[Dict]:
                 if json_end != -1:
                     data_str = data_str[json_start:json_end]
             
-            # Пытаемся распарсить как JSON
+            # Парсим JSON
             try:
                 raw_kb = json.loads(data_str)
-                
-                # Нормализуем структуру (преобразуем русские ключи в английские)
                 knowledge_base = normalize_knowledge_base(raw_kb)
-                
+                print(f"✅ Parsed knowledge_base: {json.dumps(knowledge_base, ensure_ascii=False)}")
             except json.JSONDecodeError as e:
                 print(f"⚠️ JSON parse error: {e}")
-                print(f"Raw data_str: {data_str}")
-                # Если парсинг не удался, сохраняем как raw_data
+                print(f"Raw data_str (first 200 chars): {data_str[:200]}")
                 knowledge_base = {"raw_data": data_str}
             
             agent_data["knowledge_base"] = knowledge_base
         
-        # Проверяем обязательные поля
-        if not agent_data.get("agent_name") or not agent_data.get("business_type"):
-            print(f"⚠️ Missing required fields: agent_name={agent_data.get('agent_name')}, business_type={agent_data.get('business_type')}")
+        # Валидация
+        if not agent_data.get("agent_name"):
+            print(f"⚠️ Missing agent_name")
             return None
         
-        print(f"✅ Parsed agent data: {agent_data}")
+        if not agent_data.get("business_type"):
+            print(f"⚠️ Missing business_type")
+            return None
+        
+        if not agent_data.get("knowledge_base"):
+            print(f"⚠️ Missing knowledge_base")
+            return None
+        
+        print(f"✅ Successfully parsed agent data:")
+        print(f"   - agent_name: {agent_data['agent_name']}")
+        print(f"   - business_type: {agent_data['business_type']}")
+        print(f"   - knowledge_base keys: {list(agent_data['knowledge_base'].keys())}")
+        
         return agent_data
     
     except Exception as e:
@@ -142,11 +142,9 @@ def parse_agent_ready_response(response_text: str) -> Optional[Dict]:
 def normalize_knowledge_base(raw_kb: dict) -> dict:
     """
     Нормализует базу знаний — преобразует русские ключи в английские
-    и приводит к стандартному формату
     """
     normalized = {}
     
-    # Маппинг русских ключей на английские
     key_mapping = {
         "услуги": "services",
         "товары": "services",
@@ -157,20 +155,17 @@ def normalize_knowledge_base(raw_kb: dict) -> dict:
         "сайт": "website",
         "стиль": "style",
         "faq": "faq",
-        "частые вопросы": "faq"
+        "частые вопросы": "faq",
+        "персона агента": "persona_info"
     }
     
     for key, value in raw_kb.items():
-        # Приводим ключ к нижнему регистру
         key_lower = key.lower().strip()
-        
-        # Ищем соответствие в маппинге
         english_key = key_mapping.get(key_lower, key_lower)
         
-        # Специальная обработка для услуг
+        # Обработка услуг
         if english_key == "services":
             if isinstance(value, dict):
-                # Преобразуем {"Услуга": "Цена"} в [{"name": "Услуга", "price": "Цена"}]
                 services_list = []
                 for service_name, service_price in value.items():
                     services_list.append({
@@ -183,18 +178,18 @@ def normalize_knowledge_base(raw_kb: dict) -> dict:
             else:
                 normalized["services"] = [{"name": str(value), "price": "цена по запросу"}]
         
-        # Специальная обработка для цен
+        # Обработка цен
         elif english_key == "prices":
             if isinstance(value, dict):
                 normalized["prices"] = value
             else:
                 normalized["prices"] = {"общее": str(value)}
         
-        # Игнорируем "Стиль" — это не часть базы знаний
-        elif english_key == "style":
+        # Игнорируем служебные поля
+        elif english_key in ["style", "persona_info"]:
             continue
         
-        # Остальные поля копируем как есть
+        # Остальное копируем
         else:
             normalized[english_key] = value
     
