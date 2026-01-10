@@ -1,11 +1,12 @@
 """
 OpenAI Service for chat completions
 """
-import openai
+from openai import AsyncOpenAI
 from typing import List, Dict
 from app.core.config import settings
 
-openai.api_key = settings.OPENAI_API_KEY
+# Initialize client
+client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
 
 async def chat_completion(
@@ -30,7 +31,7 @@ async def chat_completion(
         model = settings.OPENAI_MODEL
     
     try:
-        response = await openai.ChatCompletion.acreate(
+        response = await client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
