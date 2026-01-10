@@ -22,7 +22,7 @@ class Conversation(Base):
     last_message_at = Column(DateTime, default=datetime.utcnow)
     ended_at = Column(DateTime, nullable=True)
     
-    metadata = Column(JSONB, default=dict)
+    meta_data = Column(JSONB, default=dict)
     
     agent = relationship("Agent", back_populates="conversations")
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
