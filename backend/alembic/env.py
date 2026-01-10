@@ -15,7 +15,7 @@ from app.core.database import Base
 # Импортируем все модели, чтобы Alembic их видел
 from app.models.user import User
 from app.models.agent import Agent
-from app.models.channel import Channel
+from app.models.channel import AgentChannel
 from app.models.conversation import Conversation
 
 # this is the Alembic Config object, which provides
