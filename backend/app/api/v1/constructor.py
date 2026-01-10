@@ -91,27 +91,25 @@ async def constructor_chat(
     request: ConstructorChatRequest,
     db: Session = Depends(get_db)
 ):
-    """Диалог с мета-агентом для создания агента-продавца."""
+    """Конструктор агентов через диалог с мета-агентом"""
     try:
-        # Форматируем user_id
-        user_id_raw = request.user_id
-        user_id = format_uuid(user_id_raw)
-        
-        logger.info(f"📝 user_id: '{user_id_raw}' → '{user_id}'")
-        
-        # Создаём пользователя
+        # Конвертируем user_id в валидный UUID
+        user_id = format_uuid(request.user_id)
+        logger.info(f"🔄 Конструктор: user_id = {user_id}")
+
+        # Проверяем существование пользователя
         user = db.query(User).filter(User.id == user_id).first()
+        
         if not user:
-            user = User(
+            logger.info(f"👤 Создаём нового пользователя: {user_id}")
+            new_user = User(
                 id=user_id,
-                telegram_id=None,
-                plan_type=PlanType.FREE,
-                plan_expires_at=None
+                plan="free"  # ✅ Убрали telegram_id
             )
-            db.add(user)
+            db.add(new_user)
             db.commit()
-            db.refresh(user)
-            logger.info(f"✅ Создан новый пользователь: {user_id}")
+            logger.info(f"✅ Пользователь создан: {user_id}")
+
         
         # История диалога
         if user_id not in conversations:
