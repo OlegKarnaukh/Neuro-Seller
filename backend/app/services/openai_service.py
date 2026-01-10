@@ -42,178 +42,157 @@ async def chat_completion(
     except Exception as e:
         raise Exception(f"OpenAI API error: {str(e)}")
 
-def parse_agent_ready_response(response_text: str) -> Optional[Dict]:
+def parse_agent_ready_response(content: str) -> Optional[Dict[str, Any]]:
     """
-    Парсит ответ агента и извлекает данные для создания агента
+    Парсит ответ мета-агента и извлекает данные для создания агента.
     
     Ожидаемый формат:
     ---AGENT-READY---
-    NAME: виктория
+    NAME: Виктория
     TYPE: Салон красоты
-    DATA: {"services": [...]}
+    DATA: {...}
     ---
+    
+    Или инлайн-формат:
+    ---AGENT-READY--- NAME: виктория TYPE: Салон красоты DATA: {...}
     """
-    if "---AGENT-READY---" not in response_text:
+    
+    # Ищем тег ---AGENT-READY---
+    if "---AGENT-READY---" not in content:
+        logger.info("❌ Тег ---AGENT-READY--- не найден в ответе")
         return None
     
+    logger.info("✅ Тег ---AGENT-READY--- найден!")
+    
     try:
-        # Извлекаем блок между ---AGENT-READY--- и ---
-        pattern = r"---AGENT-READY---(.*?)---"
-        match = re.search(pattern, response_text, re.DOTALL)
+        # Извлекаем блок после тега ---AGENT-READY---
+        # Убираем всё до тега
+        agent_block = content.split("---AGENT-READY---", 1)[1]
         
-        if not match:
-            print("⚠️ No match found for ---AGENT-READY--- block")
-            return None
+        # Убираем закрывающий тег ---, если есть
+        if "---" in agent_block:
+            agent_block = agent_block.split("---")[0]
         
-        content = match.group(1).strip()
-        print(f"📋 Extracted content:\n{content}\n")
+        # Убираем эмодзи и лишний текст после DATA
+        # Оставляем только NAME, TYPE, DATA
+        agent_block = agent_block.strip()
         
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Извлекаем NAME (только первое слово)
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        logger.info(f"📋 Извлечённый блок (первые 300 символов):\n{agent_block[:300]}")
         
-        name_match = re.search(r"NAME:\s*(\S+)", content, re.IGNORECASE)
+        # Извлекаем NAME
+        name_match = re.search(r'NAME:\s*([^\n\r]+?)(?:\s+TYPE:|$)', agent_block, re.IGNORECASE)
         if not name_match:
-            print("⚠️ NAME not found")
+            logger.error("❌ NAME не найден")
             return None
         
-        agent_name = name_match.group(1).strip().lower()
-        print(f"✅ agent_name: '{agent_name}'")
+        agent_name = name_match.group(1).strip()
+        logger.info(f"✅ agent_name: '{agent_name}'")
         
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Извлекаем TYPE (всё до переноса или до DATA)
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        type_match = re.search(r"TYPE:\s*([^\n]+?)(?:\n|DATA:|$)", content, re.IGNORECASE)
+        # Извлекаем TYPE
+        type_match = re.search(r'TYPE:\s*([^\n\r]+?)(?:\s+DATA:|$)', agent_block, re.IGNORECASE)
         if not type_match:
-            print("⚠️ TYPE not found")
+            logger.error("❌ TYPE не найден")
             return None
         
         business_type = type_match.group(1).strip()
-        # Убираем "DATA:" если попало
-        business_type = re.sub(r'\s*DATA:.*', '', business_type, flags=re.IGNORECASE).strip()
-        print(f"✅ business_type: '{business_type}'")
+        logger.info(f"✅ business_type: '{business_type}'")
         
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Извлекаем DATA (JSON)
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        data_match = re.search(r"DATA:\s*(\{.+?\})\s*(?:\n|$)", content, re.DOTALL | re.IGNORECASE)
+        # Извлекаем DATA (JSON или текст)
+        data_match = re.search(r'DATA:\s*(.+?)(?:\n🎉|\n---|$)', agent_block, re.IGNORECASE | re.DOTALL)
         if not data_match:
-            print("⚠️ DATA not found")
+            logger.error("❌ DATA не найден")
             return None
         
-        data_str = data_match.group(1).strip()
-        print(f"📦 JSON string (first 200 chars): {data_str[:200]}")
+        data_raw = data_match.group(1).strip()
         
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # Ищем первый '{' и соответствующий '}'
+        json_start = data_raw.find('{')
+        if json_start == -1:
+            logger.error("❌ JSON не найден в DATA")
+            return None
+        
+        # Находим соответствующую закрывающую скобку
+        brace_count = 0
+        json_end = -1
+        for i in range(json_start, len(data_raw)):
+            if data_raw[i] == '{':
+                brace_count += 1
+            elif data_raw[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+        
+        if json_end == -1:
+            logger.error("❌ Не найдена закрывающая скобка JSON")
+            return None
+        
+        json_str = data_raw[json_start:json_end]
+        logger.info(f"📦 JSON строка (первые 200 символов): {json_str[:200]}")
+        
         # Парсим JSON
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
         try:
-            raw_kb = json.loads(data_str)
-            knowledge_base = normalize_knowledge_base(raw_kb)
-            print(f"✅ knowledge_base parsed successfully")
-            print(f"   Keys: {list(knowledge_base.keys())}")
+            knowledge_base = json.loads(json_str)
+            logger.info("✅ knowledge_base успешно распарсена")
+            logger.info(f"   Ключи: {list(knowledge_base.keys())}")
+            
+            # Нормализуем базу знаний (русские ключи → английские)
+            knowledge_base = normalize_knowledge_base(knowledge_base)
+            
+            return {
+                "agent_name": agent_name.capitalize(),
+                "business_type": business_type,
+                "knowledge_base": knowledge_base
+            }
+            
         except json.JSONDecodeError as e:
-            print(f"❌ JSON parse error: {e}")
-            print(f"   Raw JSON: {data_str}")
-            knowledge_base = {"raw_data": data_str}
-        
-        return {
-            "agent_name": agent_name,
-            "business_type": business_type,
-            "knowledge_base": knowledge_base
-        }
+            logger.error(f"❌ Ошибка парсинга JSON: {e}")
+            logger.error(f"   JSON строка: {json_str}")
+            return None
     
     except Exception as e:
-        print(f"❌ Error in parse_agent_ready_response: {str(e)}")
+        logger.error(f"❌ Ошибка парсинга AGENT-READY: {e}")
         import traceback
-        traceback.print_exc()
+        logger.error(traceback.format_exc())
         return None
 
-def normalize_knowledge_base(raw_kb: dict) -> dict:
+
+def normalize_knowledge_base(kb: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Нормализует базу знаний — преобразует русские ключи в английские
-    и приводит к стандартному формату
+    Нормализует базу знаний: русские ключи → английские.
+    Преобразует структуру услуг в единый формат.
     """
     normalized = {}
     
     # Маппинг русских ключей на английские
     key_mapping = {
         "услуги": "services",
-        "товары": "services",
         "цены": "prices",
+        "товары": "products",
+        "о_бизнесе": "about",
         "контакты": "contacts",
-        "о компании": "about",
-        "описание": "about",
-        "сайт": "website",
-        "стиль": "style",
         "faq": "faq",
-        "частые вопросы": "faq",
-        "персона агента": "persona_info",
-        "персона": "persona_info"
+        "сайт": "website",
+        "дополнительно": "additional_info"
     }
     
-    for key, value in raw_kb.items():
-        # Приводим ключ к нижнему регистру
-        key_lower = key.lower().strip()
+    for key, value in kb.items():
+        # Переводим ключ
+        eng_key = key_mapping.get(key.lower(), key)
         
-        # Ищем соответствие в маппинге
-        english_key = key_mapping.get(key_lower, key_lower)
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Специальная обработка для услуг
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        if english_key == "services":
+        # Обрабатываем услуги
+        if eng_key == "services":
+            # Если services — это объект {"название": "цена"}, преобразуем в список
             if isinstance(value, dict):
-                # Преобразуем {"Услуга": "Цена"} в [{"name": "Услуга", "price": "Цена"}]
-                services_list = []
-                for service_name, service_price in value.items():
-                    services_list.append({
-                        "name": service_name,
-                        "price": service_price
-                    })
-                normalized["services"] = services_list
+                normalized["services"] = [
+                    {"name": name, "price": price}
+                    for name, price in value.items()
+                ]
+            # Если уже список — оставляем как есть
             elif isinstance(value, list):
-                # Уже список — проверяем формат
-                normalized_services = []
-                for item in value:
-                    if isinstance(item, dict):
-                        normalized_services.append(item)
-                    else:
-                        normalized_services.append({
-                            "name": str(item),
-                            "price": "цена по запросу"
-                        })
-                normalized["services"] = normalized_services
-            else:
-                normalized["services"] = [{"name": str(value), "price": "цена по запросу"}]
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Специальная обработка для цен
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        elif english_key == "prices":
-            if isinstance(value, dict):
-                normalized["prices"] = value
-            else:
-                normalized["prices"] = {"общее": str(value)}
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Игнорируем служебные поля
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        elif english_key in ["style", "persona_info"]:
-            # Эти поля не нужны в базе знаний агента
-            continue
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Остальные поля копируем как есть
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
+                normalized["services"] = value
         else:
-            normalized[english_key] = value
+            normalized[eng_key] = value
     
     return normalized
+
