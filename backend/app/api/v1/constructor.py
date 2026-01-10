@@ -158,6 +158,49 @@ def extract_info_from_website(url: str) -> Dict[str, Any]:
         return {}
 
 
+def knowledge_base_to_string(kb: Dict[str, Any]) -> str:
+    """
+    Конвертирует knowledge_base (словарь) в строку для промпта.
+    """
+    lines = []
+    
+    # Услуги/товары
+    if "services" in kb and kb["services"]:
+        lines.append("УСЛУГИ/ТОВАРЫ:")
+        for service in kb["services"]:
+            name = service.get("name", "")
+            price = service.get("price", "")
+            if price:
+                lines.append(f"- {name}: {price}")
+            else:
+                lines.append(f"- {name}")
+    
+    # Описание
+    if "about" in kb and kb["about"]:
+        lines.append(f"\nО БИЗНЕСЕ:\n{kb['about']}")
+    
+    # Контакты
+    if "contacts" in kb and kb["contacts"]:
+        lines.append("\nКОНТАКТЫ:")
+        contacts = kb["contacts"]
+        if contacts.get("phone"):
+            lines.append(f"Телефон: {contacts['phone']}")
+        if contacts.get("email"):
+            lines.append(f"Email: {contacts['email']}")
+        if contacts.get("address"):
+            lines.append(f"Адрес: {contacts['address']}")
+    
+    # Сайт
+    if "website" in kb and kb["website"]:
+        lines.append(f"\nСайт: {kb['website']}")
+    
+    # Дополнительная информация
+    if "additional_info" in kb and kb["additional_info"]:
+        lines.append(f"\nДОПОЛНИТЕЛЬНО:\n{kb['additional_info']}")
+    
+    return "\n".join(lines)
+
+
 def merge_knowledge_bases(old_kb: Dict[str, Any], new_kb: Dict[str, Any]) -> Dict[str, Any]:
     """
     Объединяет две базы знаний.
@@ -278,19 +321,25 @@ async def constructor_chat(
         if agent_data:
             logger.info("✅ Создаём агента...")
             
+            # Конвертируем knowledge_base из dict в string
+            kb_dict = agent_data["knowledge_base"]
+            kb_string = knowledge_base_to_string(kb_dict)
+            
+            # Генерируем system_prompt с 3 параметрами (без persona)
+            system_prompt = generate_seller_prompt(
+                agent_name=agent_data["agent_name"],
+                business_type=agent_data["business_type"],
+                knowledge_base=kb_string  # ← Передаём строку
+            )
+            
             new_agent = Agent(
                 id=uuid4(),
                 user_id=user_id,
                 agent_name=agent_data["agent_name"],
                 business_type=agent_data["business_type"],
                 persona="Victoria",
-                knowledge_base=agent_data["knowledge_base"],
-                system_prompt=generate_seller_prompt(
-                    agent_name=agent_data["agent_name"],
-                    business_type=agent_data["business_type"],
-                    knowledge_base=agent_data["knowledge_base"],
-                    persona="Victoria"
-                ),
+                knowledge_base=kb_dict,  # ← Сохраняем как dict
+                system_prompt=system_prompt,
                 status="active",
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow()
