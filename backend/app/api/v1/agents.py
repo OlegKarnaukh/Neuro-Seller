@@ -143,7 +143,69 @@ async def get_agent(
     return agent
 
 
-@router.post("/", response_model=AgentResponse)
+async def _create_agent_logic(
+    request: CreateAgentRequest,
+    db: Session
+) -> Agent:
+    """
+    Общая логика создания агента (используется для обоих вариантов роута).
+    """
+    # Проверяем, что пользователь существует
+    user = db.query(User).filter(User.id == request.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Определяем персону
+    persona = request.persona
+    if not persona:
+        # Автоопределение по имени агента
+        agent_name_lower = request.agent_name.lower()
+        if any(name in agent_name_lower for name in ["виктория", "victoria", "анна", "мария", "елена"]):
+            persona = "victoria"
+        else:
+            persona = "alexander"
+    
+    # Устанавливаем дефолтную аватарку, если не указана
+    avatar_url = request.avatar_url or DEFAULT_AVATARS.get(persona)
+    
+    # Генерируем system_prompt из базы знаний
+    knowledge_base = request.knowledge_base or {}
+    system_prompt = generate_seller_prompt(
+        agent_name=request.agent_name,
+        business_type=request.business_type,
+        knowledge_base=knowledge_base
+    )
+    
+    # Создаём агента
+    new_agent = Agent(
+        id=uuid4(),
+        user_id=request.user_id,
+        agent_name=request.agent_name,
+        business_type=request.business_type,
+        persona=persona,
+        knowledge_base=knowledge_base,
+        system_prompt=system_prompt,
+        avatar_url=avatar_url,
+        status=request.status or "draft",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow()
+    )
+    
+    db.add(new_agent)
+    db.commit()
+    db.refresh(new_agent)
+    
+    logger.info(f"✅ Агент '{new_agent.agent_name}' создан вручную (ID: {new_agent.id})")
+    logger.info(f"   user_id: {request.user_id}")
+    logger.info(f"   business_type: {request.business_type}")
+    logger.info(f"   persona: {persona}")
+    logger.info(f"   status: {request.status or 'draft'}")
+    
+    return new_agent
+
+
+@router.post("/create", response_model=AgentResponse)
+@router.post("/create/", response_model=AgentResponse)
 async def create_agent(
     request: CreateAgentRequest,
     db: Session = Depends(get_db)
@@ -163,59 +225,7 @@ async def create_agent(
     - status: "draft" (по умолчанию), "active", "archived"
     """
     try:
-        # Проверяем, что пользователь существует
-        user = db.query(User).filter(User.id == request.user_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Определяем персону
-        persona = request.persona
-        if not persona:
-            # Автоопределение по имени агента
-            agent_name_lower = request.agent_name.lower()
-            if any(name in agent_name_lower for name in ["виктория", "victoria", "анна", "мария", "елена"]):
-                persona = "victoria"
-            else:
-                persona = "alexander"
-        
-        # Устанавливаем дефолтную аватарку, если не указана
-        avatar_url = request.avatar_url or DEFAULT_AVATARS.get(persona)
-        
-        # Генерируем system_prompt из базы знаний
-        knowledge_base = request.knowledge_base or {}
-        system_prompt = generate_seller_prompt(
-            agent_name=request.agent_name,
-            business_type=request.business_type,
-            knowledge_base=knowledge_base
-        )
-        
-        # Создаём агента
-        new_agent = Agent(
-            id=uuid4(),
-            user_id=request.user_id,
-            agent_name=request.agent_name,
-            business_type=request.business_type,
-            persona=persona,
-            knowledge_base=knowledge_base,
-            system_prompt=system_prompt,
-            avatar_url=avatar_url,
-            status=request.status or "draft",
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
-        )
-        
-        db.add(new_agent)
-        db.commit()
-        db.refresh(new_agent)
-        
-        logger.info(f"✅ Агент '{new_agent.agent_name}' создан вручную (ID: {new_agent.id})")
-        logger.info(f"   user_id: {request.user_id}")
-        logger.info(f"   business_type: {request.business_type}")
-        logger.info(f"   persona: {persona}")
-        logger.info(f"   status: {request.status or 'draft'}")
-        
-        return new_agent
-    
+        return await _create_agent_logic(request, db)
     except HTTPException:
         raise
     except Exception as e:
