@@ -13,7 +13,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
-# Добавляем путь к модулям
 sys.path.insert(0, '/app/backend')
 
 from app.core.database import get_db
@@ -22,12 +21,10 @@ from app.models.user import User, PlanType
 from app.prompts import META_AGENT_PROMPT, generate_seller_prompt
 from app.services.openai_service import chat_completion, parse_agent_ready_response
 
-# Настройка логирования
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# In-memory хранилище диалогов (для демо)
 conversations: Dict[str, List[Dict[str, str]]] = {}
 
 
@@ -42,11 +39,37 @@ class ConstructorChatRequest(BaseModel):
     messages: List[Message]
 
 
+class AgentData(BaseModel):
+    """Данные агента для Base44"""
+    agent_name: str
+    business_type: str
+    knowledge_base: Dict[str, Any]
+
+
 class ConstructorChatResponse(BaseModel):
-    response: str
-    agent_created: bool = False
-    agent_updated: bool = False
+    """
+    Base44 Integration Response Format:
+    
+    Обычный ответ:
+    {
+      "response": "Текст ответа мета-агента"
+    }
+    
+    Агент готов:
+    {
+      "status": "agent_ready",
+      "agent_id": "uuid",
+      "agent_data": {
+        "agent_name": "Виктория",
+        "business_type": "Салон красоты",
+        "knowledge_base": {...}
+      }
+    }
+    """
+    response: Optional[str] = None
+    status: Optional[str] = None
     agent_id: Optional[str] = None
+    agent_data: Optional[AgentData] = None
 
 
 # Вспомогательные функции
@@ -58,9 +81,7 @@ def parse_website(text: str) -> List[str]:
 
 
 def extract_info_from_website(url: str) -> Dict[str, Any]:
-    """
-    Извлекает информацию с сайта через OpenAI
-    """
+    """Извлекает информацию с сайта через OpenAI"""
     try:
         logger.info(f"🌐 Парсинг сайта: {url}")
         
@@ -83,7 +104,6 @@ def extract_info_from_website(url: str) -> Dict[str, Any]:
             temperature=0.3
         )
         
-        # Извлекаем JSON из ответа
         json_match = re.search(r'\{.*\}', response, re.DOTALL)
         if json_match:
             json_str = json_match.group()
@@ -99,32 +119,18 @@ def extract_info_from_website(url: str) -> Dict[str, Any]:
         return {}
 
 
-def merge_knowledge_bases(existing: Dict, new: Dict) -> Dict:
-    """Объединяет две базы знаний"""
-    merged = existing.copy()
-    
-    # Объединяем services
-    if "services" in new:
-        if "services" not in merged:
-            merged["services"] = []
-        merged["services"].extend(new["services"])
-    
-    # Обновляем остальные поля
-    for key in ["about", "contacts", "business_type"]:
-        if key in new and new[key]:
-            merged[key] = new[key]
-    
-    return merged
-
-
-# Основной эндпоинт
 @router.post("/chat", response_model=ConstructorChatResponse)
 async def constructor_chat(
     request: ConstructorChatRequest,
     db: Session = Depends(get_db)
 ):
     """
-    Диалог с мета-агентом для создания агента-продавца
+    Диалог с мета-агентом для создания агента-продавца.
+    
+    Base44 Integration:
+    - Входной формат: {"user_id": "...", "messages": [...]}
+    - Выходной формат (агент готов): {"status": "agent_ready", "agent_id": "...", "agent_data": {...}}
+    - Выходной формат (обычный): {"response": "..."}
     """
     try:
         user_id = request.user_id
@@ -151,7 +157,6 @@ async def constructor_chat(
         
         # Добавляем новые сообщения из запроса
         for msg in request.messages:
-            # Проверяем, что сообщение не дублируется
             if not conversation or conversation[-1]["content"] != msg.content:
                 conversation.append({
                     "role": msg.role,
@@ -174,7 +179,6 @@ async def constructor_chat(
                 site_info = extract_info_from_website(url)
                 
                 if site_info:
-                    # Добавляем информацию с сайта в контекст
                     system_message = f"[СИСТЕМА: Изучил сайт {url}.\nСодержимое:\n{json.dumps(site_info, ensure_ascii=False, indent=2)}]"
                     conversation.append({
                         "role": "system",
@@ -188,7 +192,7 @@ async def constructor_chat(
         context.extend(conversation)
         
         # Отправляем запрос к OpenAI
-        assistant_response = chat_completion(
+        assistant_response = await chat_completion(
             messages=context,
             model="gpt-4o-mini",
             temperature=0.7
@@ -210,14 +214,14 @@ async def constructor_chat(
             business_type = agent_data["business_type"]
             kb_dict = agent_data["knowledge_base"]
             
-            # Генерируем system_prompt (передаём kb_dict как словарь)
+            # Генерируем system_prompt
             system_prompt = generate_seller_prompt(
                 agent_name=agent_name,
                 business_type=business_type,
                 knowledge_base=kb_dict
             )
             
-            # Определяем персону (victoria или alexander)
+            # Определяем персону
             persona_name = "victoria" if "виктория" in agent_name.lower() else "alexander"
             
             # Проверяем, есть ли уже агент у пользователя
@@ -229,20 +233,24 @@ async def constructor_chat(
                 # Обновляем существующего агента
                 existing_agent.agent_name = agent_name
                 existing_agent.business_type = business_type
-                existing_agent.persona = persona_name  # ✅ короткое имя (victoria/alexander)
-                existing_agent.system_prompt = system_prompt  # ✅ длинный промпт
+                existing_agent.persona = persona_name
+                existing_agent.system_prompt = system_prompt
                 existing_agent.knowledge_base = kb_dict
-                existing_agent.status = "active"
+                existing_agent.status = "draft"  # ✅ draft до нажатия "Сохранить"
                 existing_agent.updated_at = datetime.utcnow()
                 db.commit()
                 
                 logger.info(f"✅ Агент обновлён! ID: {existing_agent.id}")
                 
+                # ✅ Base44 формат ответа
                 return ConstructorChatResponse(
-                    response=f"🎉 Отлично! Агент '{agent_name}' обновлён!",
-                    agent_created=False,
-                    agent_updated=True,
-                    agent_id=str(existing_agent.id)
+                    status="agent_ready",
+                    agent_id=str(existing_agent.id),
+                    agent_data=AgentData(
+                        agent_name=agent_name,
+                        business_type=business_type,
+                        knowledge_base=kb_dict
+                    )
                 )
             else:
                 # Создаём нового агента
@@ -251,10 +259,10 @@ async def constructor_chat(
                     user_id=user_id,
                     agent_name=agent_name,
                     business_type=business_type,
-                    persona=persona_name,  # ✅ короткое имя (victoria/alexander)
-                    system_prompt=system_prompt,  # ✅ длинный промпт
+                    persona=persona_name,
+                    system_prompt=system_prompt,
                     knowledge_base=kb_dict,
-                    status="active",
+                    status="draft",  # ✅ draft до нажатия "Сохранить"
                     created_at=datetime.utcnow(),
                     updated_at=datetime.utcnow()
                 )
@@ -267,19 +275,20 @@ async def constructor_chat(
                 # Очищаем историю диалога
                 conversations[user_id] = []
                 
+                # ✅ Base44 формат ответа
                 return ConstructorChatResponse(
-                    response=f"🎉 Отлично! Агент '{agent_name}' создан!",
-                    agent_created=True,
-                    agent_updated=False,
-                    agent_id=str(new_agent.id)
+                    status="agent_ready",
+                    agent_id=str(new_agent.id),
+                    agent_data=AgentData(
+                        agent_name=agent_name,
+                        business_type=business_type,
+                        knowledge_base=kb_dict
+                    )
                 )
         
         # Если агент не готов, возвращаем обычный ответ
         return ConstructorChatResponse(
-            response=assistant_response,
-            agent_created=False,
-            agent_updated=False,
-            agent_id=None
+            response=assistant_response
         )
     
     except Exception as e:
