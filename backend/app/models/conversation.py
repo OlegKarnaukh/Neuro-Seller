@@ -22,7 +22,7 @@ class Conversation(Base):
     last_message_at = Column(DateTime, default=datetime.utcnow)
     ended_at = Column(DateTime, nullable=True)
     
-    meta_data = Column(JSONB, default=dict)
+    meta_data = Column(JSONB, default=dict)  # ← ИЗМЕНЕНО (1)
     
     agent = relationship("Agent", back_populates="conversations")
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
@@ -38,7 +38,7 @@ class Message(Base):
     content_type = Column(String(50), default="text")  # text, image, audio, file
     
     text = Column(Text, nullable=True)
-    metadata = Column(JSONB, default=dict)
+    meta_data = Column(JSONB, default=dict)  # ← ИЗМЕНЕНО (2) !!!!
     
     tokens_used = Column(Integer, default=0)
     
