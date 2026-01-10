@@ -6,17 +6,17 @@ import json
 import re
 import logging
 from typing import List, Dict, Optional, Any
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Инициализация OpenAI клиента
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Инициализация АСИНХРОННОГО OpenAI клиента
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
-def chat_completion(
+async def chat_completion(
     messages: List[Dict[str, str]], 
     model: str = "gpt-4o-mini",
     temperature: float = 0.7,
@@ -38,7 +38,7 @@ def chat_completion(
         logger.info(f"🤖 Отправка запроса к OpenAI (model={model})")
         logger.info(f"📝 Количество сообщений: {len(messages)}")
         
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
