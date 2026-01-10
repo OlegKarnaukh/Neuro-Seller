@@ -1,12 +1,16 @@
 """
 Neuro-Seller FastAPI Application
 """
+import subprocess
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import init_db, engine
 from app.api.v1 import api_router
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
 
 # Create FastAPI app
 app = FastAPI(
@@ -36,9 +40,27 @@ async def startup_event():
     print(f"📊 Environment: {settings.ENVIRONMENT}")
     
     try:
+        # Запускаем миграции Alembic
+        logger.info("🔄 Запуск миграций базы данных...")
+        result = subprocess.run(
+            ["alembic", "upgrade", "head"],
+            cwd="/app/backend",
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            logger.info("✅ Миграции применены успешно")
+            print("✅ Миграции применены успешно")
+        else:
+            logger.error(f"❌ Ошибка миграций: {result.stderr}")
+            print(f"❌ Ошибка миграций: {result.stderr}")
+        
+        # Инициализируем БД (создаём таблицы, если их нет)
         init_db()
         print("✅ Database initialized")
     except Exception as e:
+        logger.error(f"❌ Database initialization failed: {e}")
         print(f"❌ Database initialization failed: {e}")
 
 
