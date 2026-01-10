@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from app.core.database import get_db
@@ -23,11 +23,24 @@ class AgentResponse(BaseModel):
     agent_name: str
     business_type: str
     persona: str
+    avatar_url: Optional[str] = None
+    knowledge_base: Optional[Dict[str, Any]] = None
+    system_prompt: Optional[str] = None
     status: str
     created_at: datetime
+    updated_at: datetime
     
     class Config:
         from_attributes = True
+
+
+class UpdateAgentRequest(BaseModel):
+    agent_name: Optional[str] = None
+    business_type: Optional[str] = None
+    system_prompt: Optional[str] = None
+    knowledge_base: Optional[Dict[str, Any]] = None
+    avatar_url: Optional[str] = None
+    status: Optional[str] = None
 
 
 class TestAgentRequest(BaseModel):
@@ -76,6 +89,55 @@ async def get_agent(
         raise HTTPException(status_code=404, detail="Agent not found")
     
     return agent
+
+
+@router.put("/{agent_id}", response_model=AgentResponse)
+async def update_agent(
+    agent_id: str,
+    request: UpdateAgentRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Update an agent's information.
+    
+    Allows updating:
+    - agent_name: Display name of the agent
+    - business_type: Type of business (e.g., "Салон красоты")
+    - system_prompt: Full system prompt with instructions
+    - knowledge_base: JSON object with business data
+    - avatar_url: URL to agent's avatar image
+    - status: Agent status (draft/active/archived)
+    """
+    try:
+        # Получаем агента из БД
+        agent = db.query(Agent).filter(Agent.id == agent_id).first()
+        
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Обновляем только переданные поля
+        update_data = request.dict(exclude_unset=True)
+        
+        for field, value in update_data.items():
+            setattr(agent, field, value)
+        
+        # Обновляем timestamp
+        agent.updated_at = datetime.utcnow()
+        
+        db.commit()
+        db.refresh(agent)
+        
+        logger.info(f"✅ Агент {agent.agent_name} (ID: {agent_id}) обновлён")
+        logger.info(f"   Обновлённые поля: {list(update_data.keys())}")
+        
+        return agent
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Ошибка обновления агента {agent_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update agent: {str(e)}")
 
 
 @router.delete("/{agent_id}")
@@ -137,8 +199,8 @@ async def chat_with_agent(
         logger.info(f"💬 Отправка сообщения агенту {agent.agent_name} (ID: {agent_id})")
         logger.info(f"📝 Сообщение пользователя: {request.message}")
         
-        # Отправляем запрос к OpenAI
-        response = chat_completion(
+        # Отправляем запрос к OpenAI (ASYNC)
+        response = await chat_completion(
             messages=messages,
             model="gpt-4o-mini",
             temperature=0.7
@@ -183,11 +245,13 @@ async def test_agent(
     ]
     
     try:
-        result = await chat_completion(messages=messages, temperature=0.8)
+        # ASYNC call
+        response = await chat_completion(messages=messages, temperature=0.8)
         
+        # chat_completion теперь возвращает просто строку, а не dict
         return TestAgentResponse(
-            response=result["content"],
-            tokens_used=result["tokens_used"]
+            response=response,
+            tokens_used=0  # Токены можно добавить позже, если нужно
         )
         
     except Exception as e:
