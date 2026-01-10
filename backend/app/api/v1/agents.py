@@ -2,9 +2,10 @@
 Agents API - CRUD operations for seller agents
 """
 import logging
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -18,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 
 class AgentResponse(BaseModel):
-    id: str
-    user_id: str
+    id: UUID
+    user_id: UUID
     agent_name: str
     business_type: str
     persona: str
@@ -29,6 +30,11 @@ class AgentResponse(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    
+    # Автоматически конвертируем UUID в строку при сериализации
+    @field_serializer('id', 'user_id')
+    def serialize_uuid(self, value: UUID, _info) -> str:
+        return str(value)
     
     class Config:
         from_attributes = True
