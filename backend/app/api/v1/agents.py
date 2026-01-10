@@ -87,6 +87,62 @@ DEFAULT_AVATARS = {
 }
 
 
+# ============================================================
+# ВАЖНО: Специфичные роуты ПЕРЕД общими!
+# ============================================================
+
+@router.post("/test", response_model=TestAgentResponse)
+async def test_agent(
+    request: TestAgentRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Test an agent with a message (for Preview in Base44).
+    """
+    agent = db.query(Agent).filter(Agent.id == request.agent_id).first()
+    
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    if not agent.system_prompt:
+        raise HTTPException(status_code=400, detail="Agent not configured")
+    
+    # Prepare messages
+    messages = [
+        {"role": "system", "content": agent.system_prompt},
+        {"role": "user", "content": request.message}
+    ]
+    
+    try:
+        # ASYNC call
+        response = await chat_completion(messages=messages, temperature=0.8)
+        
+        # chat_completion теперь возвращает просто строку, а не dict
+        return TestAgentResponse(
+            response=response,
+            tokens_used=0  # Токены можно добавить позже, если нужно
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI error: {str(e)}")
+
+
+@router.get("/detail/{agent_id}", response_model=AgentResponse)
+async def get_agent(
+    agent_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get specific agent by ID.
+    """
+    agent = db.query(Agent).filter(Agent.id == agent_id).first()
+    
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    return agent
+
+
 @router.post("/", response_model=AgentResponse)
 async def create_agent(
     request: CreateAgentRequest,
@@ -166,34 +222,6 @@ async def create_agent(
         db.rollback()
         logger.error(f"❌ Ошибка создания агента: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}")
-
-
-@router.get("/{user_id}", response_model=List[AgentResponse])
-async def get_user_agents(
-    user_id: str,
-    db: Session = Depends(get_db)
-):
-    """
-    Get all agents for a specific user.
-    """
-    agents = db.query(Agent).filter(Agent.user_id == user_id).all()
-    return agents
-
-
-@router.get("/detail/{agent_id}", response_model=AgentResponse)
-async def get_agent(
-    agent_id: str,
-    db: Session = Depends(get_db)
-):
-    """
-    Get specific agent by ID.
-    """
-    agent = db.query(Agent).filter(Agent.id == agent_id).first()
-    
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    
-    return agent
 
 
 @router.put("/{agent_id}", response_model=AgentResponse)
@@ -329,37 +357,13 @@ async def chat_with_agent(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/test", response_model=TestAgentResponse)
-async def test_agent(
-    request: TestAgentRequest,
+@router.get("/{user_id}", response_model=List[AgentResponse])
+async def get_user_agents(
+    user_id: str,
     db: Session = Depends(get_db)
 ):
     """
-    Test an agent with a message (for Preview in Base44).
+    Get all agents for a specific user.
     """
-    agent = db.query(Agent).filter(Agent.id == request.agent_id).first()
-    
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    
-    if not agent.system_prompt:
-        raise HTTPException(status_code=400, detail="Agent not configured")
-    
-    # Prepare messages
-    messages = [
-        {"role": "system", "content": agent.system_prompt},
-        {"role": "user", "content": request.message}
-    ]
-    
-    try:
-        # ASYNC call
-        response = await chat_completion(messages=messages, temperature=0.8)
-        
-        # chat_completion теперь возвращает просто строку, а не dict
-        return TestAgentResponse(
-            response=response,
-            tokens_used=0  # Токены можно добавить позже, если нужно
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OpenAI error: {str(e)}")
+    agents = db.query(Agent).filter(Agent.user_id == user_id).all()
+    return agents
