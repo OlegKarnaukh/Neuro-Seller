@@ -19,6 +19,8 @@ class Agent(Base):
     knowledge_base = Column(JSONB, default=dict)
     system_prompt = Column(Text, nullable=True)
     
+    avatar_url = Column(Text, nullable=True)  # ← ДОБАВЬТЕ ЭТУ СТРОКУ
+    
     status = Column(String(50), default="draft")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
