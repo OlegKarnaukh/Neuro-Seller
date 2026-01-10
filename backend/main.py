@@ -3,6 +3,7 @@ Neuro-Seller FastAPI Application
 """
 import subprocess
 import logging
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
@@ -40,11 +41,15 @@ async def startup_event():
     print(f"📊 Environment: {settings.ENVIRONMENT}")
     
     try:
+        # Определяем рабочую директорию
+        # В Docker: /app, Локально: backend/
+        work_dir = "/app" if os.path.exists("/app/alembic") else "."
+        
         # Запускаем миграции Alembic
         logger.info("🔄 Запуск миграций базы данных...")
         result = subprocess.run(
             ["alembic", "upgrade", "head"],
-            cwd="/app/backend",
+            cwd=work_dir,
             capture_output=True,
             text=True
         )
