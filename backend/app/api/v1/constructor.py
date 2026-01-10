@@ -1,3 +1,6 @@
+"""
+Constructor API - Meta-agent for creating seller agents
+"""
 import json
 import re
 import logging
@@ -10,19 +13,11 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 
-# ПРАВИЛЬНЫЕ ИМПОРТЫ для структуры:
-# /app/backend/database.py
-# /app/backend/models.py  
-# /app/backend/prompts.py
-# /app/backend/services/openai_service.py
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-
-from database import get_db
-from models import User, Agent, PlanType
-from prompts import META_AGENT_PROMPT, generate_seller_prompt
-from services.openai_service import chat_completion, parse_agent_ready_response
+from app.core.database import get_db
+from app.models.agent import Agent
+from app.models.user import User, PlanType
+from app.prompts import META_AGENT_PROMPT, generate_seller_prompt
+from app.services.openai_service import chat_completion, parse_agent_ready_response
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -197,6 +192,11 @@ async def constructor_chat(
 ):
     """
     Эндпоинт для общения с мета-агентом конструктора.
+    
+    Поддерживает:
+    - Создание нового агента
+    - Обновление существующего агента
+    - Парсинг сайтов для извлечения информации
     """
     
     try:
