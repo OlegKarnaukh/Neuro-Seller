@@ -4,8 +4,9 @@ Neuro-Seller FastAPI Application
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.core.database import init_db
+from app.core.database import init_db, engine
 from app.api.v1 import api_router
+from sqlalchemy import text
 
 # Create FastAPI app
 app = FastAPI(
@@ -60,3 +61,31 @@ async def health_check():
         "version": settings.VERSION,
         "environment": settings.ENVIRONMENT
     }
+
+
+@app.get("/debug/db-schema")
+async def get_db_schema():
+    """Получить схему таблицы users"""
+    query = text("""
+        SELECT column_name, data_type, is_nullable, column_default
+        FROM information_schema.columns 
+        WHERE table_name = 'users'
+        ORDER BY ordinal_position;
+    """)
+    
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(query)
+            columns = [
+                {
+                    "name": row[0],
+                    "type": row[1],
+                    "nullable": row[2],
+                    "default": row[3]
+                }
+                for row in result
+            ]
+        
+        return {"table": "users", "columns": columns}
+    except Exception as e:
+        return {"error": str(e)}
