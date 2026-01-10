@@ -1,29 +1,44 @@
 """
 Сервис для работы с OpenAI API
 """
-from openai import AsyncOpenAI
-from app.core.config import settings
-from typing import Dict, Optional, List
+import os
 import json
 import re
+import logging
+from typing import List, Dict, Optional, Any
+from openai import OpenAI
 
-# Инициализация клиента
-client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-async def chat_completion(
-    messages: List[Dict],
-    model: Optional[str] = None,
+# Инициализация OpenAI клиента
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+def chat_completion(
+    messages: List[Dict[str, str]], 
+    model: str = "gpt-4o-mini",
     temperature: float = 0.7,
     max_tokens: int = 2000
-) -> Dict:
+) -> str:
     """
-    Отправляет запрос к OpenAI API
+    Отправляет запрос к OpenAI API и возвращает ответ.
+    
+    Args:
+        messages: Список сообщений в формате [{"role": "user", "content": "..."}]
+        model: Модель для использования (по умолчанию gpt-4o-mini)
+        temperature: Температура генерации (0-1)
+        max_tokens: Максимальное количество токенов в ответе
+    
+    Returns:
+        Текстовый ответ от модели
     """
     try:
-        if model is None:
-            model = settings.OPENAI_MODEL
+        logger.info(f"🤖 Отправка запроса к OpenAI (model={model})")
+        logger.info(f"📝 Количество сообщений: {len(messages)}")
         
-        response = await client.chat.completions.create(
+        response = client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
@@ -31,16 +46,14 @@ async def chat_completion(
         )
         
         content = response.choices[0].message.content
-        tokens_used = response.usage.total_tokens
+        logger.info(f"✅ Получен ответ от OpenAI ({len(content)} символов)")
         
-        return {
-            "content": content,
-            "tokens_used": tokens_used,
-            "model": model
-        }
+        return content
     
     except Exception as e:
-        raise Exception(f"OpenAI API error: {str(e)}")
+        logger.error(f"❌ Ошибка при обращении к OpenAI: {e}")
+        raise
+
 
 def parse_agent_ready_response(content: str) -> Optional[Dict[str, Any]]:
     """
@@ -195,4 +208,3 @@ def normalize_knowledge_base(kb: Dict[str, Any]) -> Dict[str, Any]:
             normalized[eng_key] = value
     
     return normalized
-
