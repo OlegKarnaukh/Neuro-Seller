@@ -170,10 +170,98 @@ def parse_agent_ready_response(content: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def parse_agent_update_response(content: str) -> Optional[Dict[str, Any]]:
+    """
+    Парсит ответ мета-агента для обновления существующего агента.
+    
+    Ожидаемый формат:
+    ---AGENT-UPDATE---
+    DATA: {...}
+    ---AGENT-UPDATE---
+    """
+    
+    # Ищем тег ---AGENT-UPDATE---
+    if "---AGENT-UPDATE---" not in content:
+        logger.info("❌ Тег ---AGENT-UPDATE--- не найден в ответе")
+        return None
+    
+    logger.info("✅ Тег ---AGENT-UPDATE--- найден!")
+    
+    try:
+        # Извлекаем блок между тегами
+        agent_block = content.split("---AGENT-UPDATE---")[1]
+        
+        # Убираем закрывающий тег
+        if "---AGENT-UPDATE---" in agent_block:
+            agent_block = agent_block.split("---AGENT-UPDATE---")[0]
+        
+        agent_block = agent_block.strip()
+        
+        logger.info(f"📋 Извлечённый UPDATE блок (первые 300 символов):\n{agent_block[:300]}")
+        
+        # Извлекаем DATA (JSON)
+        data_match = re.search(r'DATA:\s*(.+?)$', agent_block, re.IGNORECASE | re.DOTALL)
+        if not data_match:
+            logger.error("❌ DATA не найден в UPDATE")
+            return None
+        
+        data_raw = data_match.group(1).strip()
+        
+        # Ищем JSON
+        json_start = data_raw.find('{')
+        if json_start == -1:
+            logger.error("❌ JSON не найден в UPDATE DATA")
+            return None
+        
+        # Находим закрывающую скобку
+        brace_count = 0
+        json_end = -1
+        for i in range(json_start, len(data_raw)):
+            if data_raw[i] == '{':
+                brace_count += 1
+            elif data_raw[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+        
+        if json_end == -1:
+            logger.error("❌ Не найдена закрывающая скобка JSON в UPDATE")
+            return None
+        
+        json_str = data_raw[json_start:json_end]
+        logger.info(f"📦 UPDATE JSON (первые 200 символов): {json_str[:200]}")
+        
+        # Парсим JSON
+        try:
+            update_data = json.loads(json_str)
+            logger.info("✅ UPDATE data успешно распарсена")
+            logger.info(f"   Ключи для обновления: {list(update_data.keys())}")
+            
+            # Нормализуем базу знаний
+            update_data = normalize_knowledge_base(update_data)
+            
+            return {
+                "update_data": update_data
+            }
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга UPDATE JSON: {e}")
+            logger.error(f"   JSON строка: {json_str}")
+            return None
+    
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга AGENT-UPDATE: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
+
+
 def normalize_knowledge_base(kb: Dict[str, Any]) -> Dict[str, Any]:
     """
     Нормализует базу знаний: русские ключи → английские.
     Преобразует структуру услуг в единый формат.
+    Поддерживает новые маркетинговые поля v3.0.
     """
     normalized = {}
     
@@ -186,7 +274,18 @@ def normalize_knowledge_base(kb: Dict[str, Any]) -> Dict[str, Any]:
         "контакты": "contacts",
         "faq": "faq",
         "сайт": "website",
-        "дополнительно": "additional_info"
+        "дополнительно": "additional_info",
+        # Новые маркетинговые поля v3.0
+        "целевая_аудитория": "target_audience",
+        "ца": "target_audience",
+        "ключевая_боль": "key_pain",
+        "боль": "key_pain",
+        "утп": "usp",
+        "уникальное_предложение": "usp",
+        "возражения": "objections",
+        "акции": "promo",
+        "спецпредложения": "promo",
+        "преимущества": "advantages"
     }
     
     for key, value in kb.items():

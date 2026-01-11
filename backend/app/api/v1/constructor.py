@@ -20,7 +20,7 @@ from app.models.agent import Agent
 from app.models.user import User
 from app.models.constructor_conversation import ConstructorConversation
 from app.prompts import META_AGENT_PROMPT, generate_seller_prompt
-from app.services.openai_service import chat_completion, parse_agent_ready_response
+from app.services.openai_service import chat_completion, parse_agent_ready_response, parse_agent_update_response
 
 logger = logging.getLogger(__name__)
 
@@ -196,11 +196,11 @@ async def constructor_chat(
         conversation_record.updated_at = datetime.utcnow()
         db.commit()
         
-        # Проверяем готовность агента
+        # Проверяем готовность агента (CREATE)
         agent_data = parse_agent_ready_response(assistant_response)
         
         if agent_data:
-            logger.info(f"✅ Создаём агента...")
+            logger.info(f"✅ Создаём/обновляем агента (AGENT-READY)...")
             
             agent_name = agent_data["agent_name"]
             business_type = agent_data["business_type"]
@@ -236,8 +236,8 @@ async def constructor_chat(
                     agent_data=AgentData(
                         agent_name=agent_name,
                         business_type=business_type,
-                        description=business_type,  # ← Добавлено
-                        instructions=system_prompt,  # ← Добавлено
+                        description=business_type,
+                        instructions=system_prompt,
                         knowledge_base=kb_dict
                     )
                 )
@@ -266,11 +266,65 @@ async def constructor_chat(
                     agent_data=AgentData(
                         agent_name=agent_name,
                         business_type=business_type,
-                        description=business_type,  # ← Добавлено
-                        instructions=system_prompt,  # ← Добавлено
+                        description=business_type,
+                        instructions=system_prompt,
                         knowledge_base=kb_dict
                     )
                 )
+        
+        # Проверяем обновление агента (UPDATE)
+        update_data_response = parse_agent_update_response(assistant_response)
+        
+        if update_data_response:
+            logger.info(f"✅ Обновление агента (AGENT-UPDATE)...")
+            
+            update_data = update_data_response["update_data"]
+            
+            # Ищем существующего агента
+            existing_agent = db.query(Agent).filter(
+                Agent.user_id == user_id
+            ).first()
+            
+            if not existing_agent:
+                logger.error("❌ Агент не найден для обновления!")
+                return ConstructorChatResponse(
+                    response="Ошибка: агент не найден. Сначала создайте агента."
+                )
+            
+            # МЕРЖ логика: обновляем только переданные поля
+            current_kb = existing_agent.knowledge_base or {}
+            
+            # Обновляем каждое поле из update_data
+            for key, value in update_data.items():
+                current_kb[key] = value
+            
+            # Пересоздаём system_prompt с обновлёнными данными
+            system_prompt = generate_seller_prompt(
+                agent_name=existing_agent.agent_name,
+                business_type=existing_agent.business_type,
+                knowledge_base=current_kb
+            )
+            
+            # Обновляем агента в БД
+            existing_agent.knowledge_base = current_kb
+            existing_agent.system_prompt = system_prompt
+            existing_agent.updated_at = datetime.utcnow()
+            db.commit()
+            
+            logger.info(f"✅ Агент обновлён (мерж)! ID: {existing_agent.id}")
+            logger.info(f"   Обновлённые поля: {list(update_data.keys())}")
+            
+            return ConstructorChatResponse(
+                status="agent_updated",
+                agent_id=str(existing_agent.id),
+                agent_data=AgentData(
+                    agent_name=existing_agent.agent_name,
+                    business_type=existing_agent.business_type,
+                    description=existing_agent.business_type,
+                    instructions=system_prompt,
+                    knowledge_base=current_kb
+                )
+            )
         
         return ConstructorChatResponse(
             response=assistant_response
