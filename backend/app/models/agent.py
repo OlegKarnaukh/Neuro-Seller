@@ -21,6 +21,9 @@ class Agent(Base):
     
     avatar_url = Column(Text, nullable=True)
     
+    # Связь с conversation, из которой создан агент
+    constructor_conversation_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    
     status = Column(String(50), default="draft")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

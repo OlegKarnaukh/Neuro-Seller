@@ -13,5 +13,8 @@ class ConstructorConversation(Base):
     
     messages = Column(JSONB, default=list, nullable=False)
     
+    # Связь с созданным агентом
+    created_agent_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
