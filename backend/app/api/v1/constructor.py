@@ -441,7 +441,8 @@ async def constructor_chat(
             )
         
         return ConstructorChatResponse(
-            response=assistant_response
+            response=assistant_response,
+            conversation_id=str(conversation_record.id)
         )
     
     except Exception as e:
