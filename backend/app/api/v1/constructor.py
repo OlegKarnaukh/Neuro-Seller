@@ -36,6 +36,7 @@ class Message(BaseModel):
 class ConstructorChatRequest(BaseModel):
     user_id: str
     messages: List[Message]
+    conversation_id: Optional[str] = None  # ✅ Новое поле
 
 
 class AgentData(BaseModel):
@@ -51,6 +52,7 @@ class ConstructorChatResponse(BaseModel):
     response: Optional[str] = None
     status: Optional[str] = None
     agent_id: Optional[str] = None
+    conversation_id: Optional[str] = None  # ✅ Новое поле
     agent_data: Optional[AgentData] = None
 
 
@@ -92,25 +94,72 @@ def extract_info_from_website(url: str) -> Dict[str, Any]:
     return {}
 
 
-@router.get("/history/{user_id}", response_model=ConstructorHistoryResponse)
-async def get_constructor_history(
+@router.get("/conversations/{user_id}")
+async def get_user_conversations(
     user_id: str,
     db: Session = Depends(get_db)
 ):
-    """Получить историю диалога с конструктором"""
+    """
+    Получить все constructor conversations пользователя.
+    
+    Возвращает список всех диалогов с мета-агентом и связанных агентов.
+    """
     try:
         user_id = format_uuid(user_id)
         
-        # Ищем последнюю сессию конструктора
-        conversation = db.query(ConstructorConversation).filter(
+        conversations = db.query(ConstructorConversation).filter(
             ConstructorConversation.user_id == user_id
-        ).order_by(ConstructorConversation.updated_at.desc()).first()
+        ).order_by(ConstructorConversation.updated_at.desc()).all()
+        
+        result = []
+        for conv in conversations:
+            agent_data = None
+            if conv.created_agent_id:
+                agent = db.query(Agent).filter(Agent.id == conv.created_agent_id).first()
+                if agent:
+                    agent_data = {
+                        "id": str(agent.id),
+                        "agent_name": agent.agent_name,
+                        "business_type": agent.business_type,
+                        "status": agent.status,
+                        "avatar_url": agent.avatar_url,
+                        "persona": agent.persona
+                    }
+            
+            result.append({
+                "id": str(conv.id),
+                "created_at": conv.created_at.isoformat(),
+                "updated_at": conv.updated_at.isoformat(),
+                "agent": agent_data
+            })
+        
+        logger.info(f"📋 Найдено {len(result)} conversations для user_id={user_id}")
+        return result
+    
+    except Exception as e:
+        logger.error(f"❌ Ошибка при загрузке conversations: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/history/{conversation_id}", response_model=ConstructorHistoryResponse)
+async def get_constructor_history(
+    conversation_id: str,
+    db: Session = Depends(get_db)
+):
+    """Получить историю конкретного диалога с конструктором"""
+    try:
+        # Ищем conversation по ID
+        conversation = db.query(ConstructorConversation).filter(
+            ConstructorConversation.id == conversation_id
+        ).first()
         
         if conversation:
             messages = [Message(**msg) for msg in conversation.messages]
+            logger.info(f"📖 Загружена история conversation_id={conversation_id}, сообщений: {len(messages)}")
             return ConstructorHistoryResponse(messages=messages)
         
         # Если истории нет, возвращаем пустой массив
+        logger.warning(f"⚠️ Conversation {conversation_id} не найдена")
         return ConstructorHistoryResponse(messages=[])
     
     except Exception as e:
@@ -143,11 +192,25 @@ async def constructor_chat(
             logger.info(f"✅ Пользователь создан: {user_id}")
 
         # Загружаем или создаём сессию конструктора
-        conversation_record = db.query(ConstructorConversation).filter(
-            ConstructorConversation.user_id == user_id
-        ).order_by(ConstructorConversation.updated_at.desc()).first()
+        conversation_record = None
         
-        if not conversation_record:
+        # Если передан conversation_id → загружаем эту conversation
+        if request.conversation_id:
+            logger.info(f"📂 Загрузка conversation: {request.conversation_id}")
+            conversation_record = db.query(ConstructorConversation).filter(
+                ConstructorConversation.id == request.conversation_id,
+                ConstructorConversation.user_id == user_id
+            ).first()
+            
+            if not conversation_record:
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"Conversation {request.conversation_id} not found"
+                )
+        
+        # Если НЕТ conversation_id → создаём НОВУЮ
+        else:
+            logger.info(f"🆕 Создание новой conversation")
             conversation_record = ConstructorConversation(
                 id=uuid4(),
                 user_id=user_id,
@@ -156,6 +219,7 @@ async def constructor_chat(
                 updated_at=datetime.utcnow()
             )
             db.add(conversation_record)
+            db.flush()  # Получаем ID сразу
         
         # Преобразуем request.messages в список словарей
         conversation = [msg.dict() for msg in request.messages]
@@ -191,6 +255,35 @@ async def constructor_chat(
             "content": assistant_response
         })
         
+        # ✅ НОВАЯ ЛОГИКА: Создаём draft-агента после первого сообщения пользователя
+        if not conversation_record.created_agent_id:
+            # Проверяем, что это НЕ первое системное сообщение
+            user_messages_count = sum(1 for msg in conversation if msg.get('role') == 'user')
+            
+            if user_messages_count >= 1:  # Есть хотя бы одно сообщение от пользователя
+                logger.info("📝 Создаём draft-агента (диалог начат)")
+                
+                draft_agent = Agent(
+                    id=uuid4(),
+                    user_id=user_id,
+                    agent_name="Агент (в разработке)",  # Временное имя
+                    business_type="Не указано",  # Временный тип
+                    persona="victoria",  # Дефолтная персона
+                    system_prompt=None,  # Пока нет промпта
+                    knowledge_base={},  # Пустая база знаний
+                    status="draft",  # ✅ Статус draft
+                    constructor_conversation_id=conversation_record.id,
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow()
+                )
+                db.add(draft_agent)
+                db.flush()
+                
+                # Сохраняем связь
+                conversation_record.created_agent_id = draft_agent.id
+                
+                logger.info(f"✅ Draft-агент создан: {draft_agent.id}")
+        
         # Сохраняем историю в БД
         conversation_record.messages = conversation
         conversation_record.updated_at = datetime.utcnow()
@@ -214,25 +307,30 @@ async def constructor_chat(
             
             persona_name = "victoria" if "виктория" in agent_name.lower() else "alexander"
             
-            existing_agent = db.query(Agent).filter(
-                Agent.user_id == user_id
-            ).first()
+            # ✅ Ищем существующего draft-агента через conversation
+            existing_agent = None
+            if conversation_record.created_agent_id:
+                existing_agent = db.query(Agent).filter(
+                    Agent.id == conversation_record.created_agent_id
+                ).first()
             
             if existing_agent:
+                # ✅ Обновляем draft → test
                 existing_agent.agent_name = agent_name
                 existing_agent.business_type = business_type
                 existing_agent.persona = persona_name
                 existing_agent.system_prompt = system_prompt
                 existing_agent.knowledge_base = kb_dict
-                existing_agent.status = "draft"
+                existing_agent.status = "test"  # ✅ Активируем в режим тестирования
                 existing_agent.updated_at = datetime.utcnow()
                 db.commit()
                 
-                logger.info(f"✅ Агент обновлён! ID: {existing_agent.id}")
+                logger.info(f"✅ Агент активирован (draft → test)! ID: {existing_agent.id}")
                 
                 return ConstructorChatResponse(
                     status="agent_ready",
                     agent_id=str(existing_agent.id),
+                    conversation_id=str(conversation_record.id),
                     agent_data=AgentData(
                         agent_name=agent_name,
                         business_type=business_type,
@@ -242,6 +340,8 @@ async def constructor_chat(
                     )
                 )
             else:
+                # ⚠️ Не должно происходить (draft должен был создаться раньше)
+                logger.warning("⚠️ Draft-агент не найден, создаём новый сразу в статусе test")
                 new_agent = Agent(
                     id=uuid4(),
                     user_id=user_id,
@@ -250,11 +350,17 @@ async def constructor_chat(
                     persona=persona_name,
                     system_prompt=system_prompt,
                     knowledge_base=kb_dict,
-                    status="draft",
+                    status="test",  # ✅ Сразу в test
+                    constructor_conversation_id=conversation_record.id,
                     created_at=datetime.utcnow(),
                     updated_at=datetime.utcnow()
                 )
                 db.add(new_agent)
+                db.flush()
+                
+                # Сохраняем связь
+                conversation_record.created_agent_id = new_agent.id
+                
                 db.commit()
                 db.refresh(new_agent)
                 
@@ -263,6 +369,7 @@ async def constructor_chat(
                 return ConstructorChatResponse(
                     status="agent_ready",
                     agent_id=str(new_agent.id),
+                    conversation_id=str(conversation_record.id),
                     agent_data=AgentData(
                         agent_name=agent_name,
                         business_type=business_type,
@@ -280,15 +387,21 @@ async def constructor_chat(
             
             update_data = update_data_response["update_data"]
             
-            # Ищем существующего агента
+            # ✅ Ищем агента через conversation
+            if not conversation_record.created_agent_id:
+                logger.error("❌ Агент ещё не создан!")
+                return ConstructorChatResponse(
+                    response="Ошибка: агент ещё не создан. Сначала завершите создание агента."
+                )
+            
             existing_agent = db.query(Agent).filter(
-                Agent.user_id == user_id
+                Agent.id == conversation_record.created_agent_id
             ).first()
             
             if not existing_agent:
                 logger.error("❌ Агент не найден для обновления!")
                 return ConstructorChatResponse(
-                    response="Ошибка: агент не найден. Сначала создайте агента."
+                    response="Ошибка: агент не найден."
                 )
             
             # МЕРЖ логика: обновляем только переданные поля
@@ -317,6 +430,7 @@ async def constructor_chat(
             return ConstructorChatResponse(
                 status="agent_updated",
                 agent_id=str(existing_agent.id),
+                conversation_id=str(conversation_record.id),
                 agent_data=AgentData(
                     agent_name=existing_agent.agent_name,
                     business_type=existing_agent.business_type,
