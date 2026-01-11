@@ -117,6 +117,13 @@ async def test_agent(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
+    # ✅ Разрешаем тестирование для test, active, paused
+    if agent.status not in ["test", "active", "paused"]:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Agent is not available for testing (status: {agent.status})"
+        )
+    
     if not agent.system_prompt:
         raise HTTPException(status_code=400, detail="Agent not configured")
     
@@ -146,19 +153,27 @@ async def save_agent(
     db: Session = Depends(get_db)
 ):
     """
-    Save agent (activate it) - for Base44 integration.
+    Activate agent (test → active).
     
     Base44 Integration:
     - Request: {"agent_id": "..."}
     - Response: {"success": true, "redirect_url": "/dashboard"}
     
-    Changes agent status from 'draft' to 'active'.
+    Вызывается при подключении первого канала (Telegram/WhatsApp/etc).
+    Переход: test → active
     """
     try:
         agent = db.query(Agent).filter(Agent.id == request.agent_id).first()
         
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # ✅ Проверяем, что агент в статусе test
+        if agent.status != "test":
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Agent must be in 'test' status to activate (current: {agent.status})"
+            )
         
         # Активируем агента
         agent.status = "active"
@@ -167,7 +182,7 @@ async def save_agent(
         db.commit()
         db.refresh(agent)
         
-        logger.info(f"✅ Агент {agent.agent_name} (ID: {request.agent_id}) активирован")
+        logger.info(f"✅ Агент {agent.agent_name} активирован (test → active)")
         
         return SaveAgentResponse(
             success=True,
@@ -322,19 +337,101 @@ async def delete_agent(
     db: Session = Depends(get_db)
 ):
     """
-    Delete an agent.
+    Delete an agent (soft delete).
+    
+    Вместо физического удаления меняем статус на 'deleted'.
+    Агент остаётся в БД, но скрыт от пользователя.
     """
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    db.delete(agent)
+    # ✅ Soft delete
+    agent.status = "deleted"
+    agent.updated_at = datetime.utcnow()
     db.commit()
     
-    logger.info(f"🗑️ Агент {agent.agent_name} (ID: {agent_id}) удалён")
+    logger.info(f"🗑️ Агент {agent.agent_name} (ID: {agent_id}) удалён (soft delete)")
     
     return {"message": "Agent deleted successfully"}
+
+
+@router.post("/{agent_id}/pause")
+async def pause_agent(
+    agent_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Pause agent (active → paused).
+    
+    Останавливает работу агента во всех каналах.
+    Агент остаётся доступен для тестирования в Preview.
+    """
+    try:
+        agent = db.query(Agent).filter(Agent.id == agent_id).first()
+        
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        if agent.status != "active":
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Only active agents can be paused (current: {agent.status})"
+            )
+        
+        agent.status = "paused"
+        agent.updated_at = datetime.utcnow()
+        db.commit()
+        
+        logger.info(f"⏸️ Агент {agent.agent_name} поставлен на паузу")
+        
+        return {"message": "Agent paused successfully", "status": "paused"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Ошибка при паузе агента {agent_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{agent_id}/resume")
+async def resume_agent(
+    agent_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Resume agent (paused → active).
+    
+    Возобновляет работу агента во всех подключённых каналах.
+    """
+    try:
+        agent = db.query(Agent).filter(Agent.id == agent_id).first()
+        
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        if agent.status != "paused":
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Only paused agents can be resumed (current: {agent.status})"
+            )
+        
+        agent.status = "active"
+        agent.updated_at = datetime.utcnow()
+        db.commit()
+        
+        logger.info(f"▶️ Агент {agent.agent_name} возобновлён")
+        
+        return {"message": "Agent resumed successfully", "status": "active"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Ошибка при возобновлении агента {agent_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/{agent_id}/chat", response_model=ChatResponse)
@@ -396,10 +493,27 @@ async def chat_with_agent(
 @router.get("/{user_id}", response_model=List[AgentResponse])
 async def get_user_agents(
     user_id: str,
+    status: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """
     Get all agents for a specific user.
+    
+    Параметры:
+    - status: фильтр по статусу (draft, test, active, paused)
+    - По умолчанию: все агенты кроме deleted
     """
-    agents = db.query(Agent).filter(Agent.user_id == user_id).all()
+    query = db.query(Agent).filter(Agent.user_id == user_id)
+    
+    # Фильтр по статусу
+    if status:
+        query = query.filter(Agent.status == status)
+    else:
+        # По умолчанию: все кроме deleted
+        query = query.filter(Agent.status != "deleted")
+    
+    agents = query.order_by(Agent.updated_at.desc()).all()
+    
+    logger.info(f"📋 Найдено {len(agents)} агентов для user_id={user_id} (фильтр: {status or 'все кроме deleted'})")
+    
     return agents
