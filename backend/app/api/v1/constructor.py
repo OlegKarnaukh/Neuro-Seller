@@ -230,10 +230,6 @@ async def constructor_chat(
                 
                 logger.info(f"✅ Агент обновлён! ID: {existing_agent.id}")
                 
-                # Очищаем историю конструктора после создания агента
-                conversation_record.messages = []
-                db.commit()
-                
                 return ConstructorChatResponse(
                     status="agent_ready",
                     agent_id=str(existing_agent.id),
@@ -263,10 +259,6 @@ async def constructor_chat(
                 db.refresh(new_agent)
                 
                 logger.info(f"✅ Агент создан! ID: {new_agent.id}")
-                
-                # Очищаем историю конструктора после создания агента
-                conversation_record.messages = []
-                db.commit()
                 
                 return ConstructorChatResponse(
                     status="agent_ready",
