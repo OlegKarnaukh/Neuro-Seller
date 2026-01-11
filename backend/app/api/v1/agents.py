@@ -91,8 +91,8 @@ class ChatResponse(BaseModel):
 
 # Дефолтные аватарки по персонам
 DEFAULT_AVATARS = {
-    "victoria": "https://cdn.example.com/avatars/female-default.png",
-    "alexander": "https://cdn.example.com/avatars/male-default.png",
+    "victoria": "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&h=150&fit=crop&crop=face",
+    "alexander": "https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=150&h=150&fit=crop&crop=face",
 }
 
 
