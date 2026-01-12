@@ -17,8 +17,7 @@ depends_on = None
 
 
 def upgrade():
-    # Add new columns to users table
-    op.add_column('users', sa.Column('email', sa.String(), nullable=True))
+    # Email уже существует из миграции 003, только добавляем новые поля
     op.add_column('users', sa.Column('password_hash', sa.String(), nullable=True))
     op.add_column('users', sa.Column('tokens_limit', sa.Integer(), nullable=False, server_default='60'))
     op.add_column('users', sa.Column('tokens_used', sa.Integer(), nullable=False, server_default='0'))
@@ -28,9 +27,8 @@ def upgrade():
 
 
 def downgrade():
-    # Drop index and columns
+    # Drop index and columns (не трогаем email - он из миграции 003)
     op.drop_index('ix_users_email', table_name='users')
     op.drop_column('users', 'tokens_used')
     op.drop_column('users', 'tokens_limit')
     op.drop_column('users', 'password_hash')
-    op.drop_column('users', 'email')
