@@ -7,6 +7,8 @@ Create Date: 2026-01-12
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
+from sqlalchemy.engine.reflection import Inspector
 
 
 # revision identifiers, used by Alembic.
@@ -16,14 +18,36 @@ branch_labels = None
 depends_on = None
 
 
-def upgrade():
-    # Email уже существует из миграции 003, только добавляем новые поля
-    op.add_column('users', sa.Column('password_hash', sa.String(), nullable=True))
-    op.add_column('users', sa.Column('tokens_limit', sa.Integer(), nullable=False, server_default='60'))
-    op.add_column('users', sa.Column('tokens_used', sa.Integer(), nullable=False, server_default='0'))
+def column_exists(table_name: str, column_name: str) -> bool:
+    """Check if column exists in table"""
+    bind = op.get_bind()
+    inspector = inspect(bind)
+    columns = [col['name'] for col in inspector.get_columns(table_name)]
+    return column_name in columns
 
-    # Create unique index on email
-    op.create_index('ix_users_email', 'users', ['email'], unique=True)
+
+def index_exists(index_name: str) -> bool:
+    """Check if index exists"""
+    bind = op.get_bind()
+    inspector = inspect(bind)
+    indexes = [idx['name'] for idx in inspector.get_indexes('users')]
+    return index_name in indexes
+
+
+def upgrade():
+    # Добавляем колонки только если их нет
+    if not column_exists('users', 'password_hash'):
+        op.add_column('users', sa.Column('password_hash', sa.String(), nullable=True))
+
+    if not column_exists('users', 'tokens_limit'):
+        op.add_column('users', sa.Column('tokens_limit', sa.Integer(), nullable=False, server_default='60'))
+
+    if not column_exists('users', 'tokens_used'):
+        op.add_column('users', sa.Column('tokens_used', sa.Integer(), nullable=False, server_default='0'))
+
+    # Create unique index on email if not exists
+    if not index_exists('ix_users_email'):
+        op.create_index('ix_users_email', 'users', ['email'], unique=True)
 
 
 def downgrade():
