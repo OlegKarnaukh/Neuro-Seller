@@ -35,19 +35,37 @@ def index_exists(index_name: str) -> bool:
 
 
 def upgrade():
-    # Добавляем колонки только если их нет
-    if not column_exists('users', 'password_hash'):
-        op.add_column('users', sa.Column('password_hash', sa.String(), nullable=True))
+    """
+    Adds auth fields to users table.
+    Uses try/except as fallback if column_exists checks fail.
+    """
+    # Add password_hash
+    try:
+        if not column_exists('users', 'password_hash'):
+            op.add_column('users', sa.Column('password_hash', sa.String(), nullable=True))
+    except Exception as e:
+        print(f"Warning: Could not add password_hash column (may already exist): {e}")
 
-    if not column_exists('users', 'tokens_limit'):
-        op.add_column('users', sa.Column('tokens_limit', sa.Integer(), nullable=False, server_default='60'))
+    # Add tokens_limit
+    try:
+        if not column_exists('users', 'tokens_limit'):
+            op.add_column('users', sa.Column('tokens_limit', sa.Integer(), nullable=False, server_default='60'))
+    except Exception as e:
+        print(f"Warning: Could not add tokens_limit column (may already exist): {e}")
 
-    if not column_exists('users', 'tokens_used'):
-        op.add_column('users', sa.Column('tokens_used', sa.Integer(), nullable=False, server_default='0'))
+    # Add tokens_used
+    try:
+        if not column_exists('users', 'tokens_used'):
+            op.add_column('users', sa.Column('tokens_used', sa.Integer(), nullable=False, server_default='0'))
+    except Exception as e:
+        print(f"Warning: Could not add tokens_used column (may already exist): {e}")
 
     # Create unique index on email if not exists
-    if not index_exists('ix_users_email'):
-        op.create_index('ix_users_email', 'users', ['email'], unique=True)
+    try:
+        if not index_exists('ix_users_email'):
+            op.create_index('ix_users_email', 'users', ['email'], unique=True)
+    except Exception as e:
+        print(f"Warning: Could not create index ix_users_email (may already exist): {e}")
 
 
 def downgrade():
