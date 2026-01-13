@@ -44,42 +44,29 @@ async def startup_event():
         # Определяем рабочую директорию
         # В Docker: /app, Локально: backend/
         work_dir = "/app" if os.path.exists("/app/alembic") else "."
-
+        
         # Запускаем миграции Alembic
         logger.info("🔄 Запуск миграций базы данных...")
-        try:
-            result = subprocess.run(
-                ["alembic", "upgrade", "head"],
-                cwd=work_dir,
-                capture_output=True,
-                text=True,
-                timeout=60  # 60 секунд timeout
-            )
-
-            if result.returncode == 0:
-                logger.info("✅ Миграции применены успешно")
-                print("✅ Миграции применены успешно")
-            else:
-                logger.warning(f"⚠️ Миграции завершились с ошибкой, но продолжаем запуск")
-                logger.warning(f"   Stderr: {result.stderr}")
-                print(f"⚠️ Миграции завершились с ошибкой: {result.stderr}")
-                print("⚠️ Продолжаем запуск приложения...")
-        except subprocess.TimeoutExpired:
-            logger.warning("⚠️ Миграции превысили timeout, пропускаем")
-            print("⚠️ Миграции превысили timeout, пропускаем")
-        except Exception as migration_error:
-            logger.warning(f"⚠️ Ошибка при запуске миграций: {migration_error}")
-            print(f"⚠️ Ошибка при запуске миграций: {migration_error}")
-            print("⚠️ Продолжаем запуск приложения...")
-
+        result = subprocess.run(
+            ["alembic", "upgrade", "head"],
+            cwd=work_dir,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            logger.info("✅ Миграции применены успешно")
+            print("✅ Миграции применены успешно")
+        else:
+            logger.error(f"❌ Ошибка миграций: {result.stderr}")
+            print(f"❌ Ошибка миграций: {result.stderr}")
+        
         # Инициализируем БД (создаём таблицы, если их нет)
         init_db()
         print("✅ Database initialized")
-        print("✅ Application ready to accept connections")
     except Exception as e:
         logger.error(f"❌ Database initialization failed: {e}")
         print(f"❌ Database initialization failed: {e}")
-        print("⚠️ Пытаемся запустить приложение без БД...")
 
 
 @app.get("/")
