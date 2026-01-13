@@ -48,21 +48,34 @@ async def connect_channel(
 ):
     """
     Connect an agent to a communication channel.
+    For Telegram: verifies bot token and sets webhook automatically.
     """
+    import os
+
     # Verify agent exists
     agent = db.query(Agent).filter(Agent.id == request.agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    
+
     # Check if channel already exists
     existing = db.query(AgentChannel).filter(
         AgentChannel.agent_id == request.agent_id,
         AgentChannel.channel_type == request.channel_type
     ).first()
-    
+
     if existing:
         raise HTTPException(status_code=400, detail="Channel already connected")
-    
+
+    # For Telegram: verify bot token first
+    bot_info = None
+    if request.channel_type == "telegram":
+        bot_token = request.credentials.get("bot_token")
+        if not bot_token:
+            raise HTTPException(status_code=400, detail="bot_token is required for Telegram")
+
+        # Verify token is valid
+        bot_info = await verify_telegram_bot(bot_token)
+
     # Create channel
     channel = AgentChannel(
         agent_id=request.agent_id,
@@ -70,18 +83,26 @@ async def connect_channel(
         credentials=request.credentials,
         is_active=True
     )
-    
+
     db.add(channel)
     db.commit()
     db.refresh(channel)
-    
-    # Generate webhook URL
-    from app.core.config import settings
-    webhook_url = f"https://api.neuro-seller.com/api/v1/channels/webhook/{request.channel_type}/{channel.id}"
-    
+
+    # Generate webhook URL using Railway URL
+    base_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "neuro-seller-production.up.railway.app")
+    webhook_url = f"https://{base_url}/api/v1/channels/webhook/{request.channel_type}/{channel.id}"
+
     channel.webhook_url = webhook_url
     db.commit()
-    
+
+    # For Telegram: set webhook
+    if request.channel_type == "telegram":
+        bot_token = request.credentials.get("bot_token")
+        await set_telegram_webhook(bot_token, webhook_url)
+        channel.webhook_verified = True
+        channel.settings = {"bot_username": bot_info.get("username"), "bot_name": bot_info.get("first_name")}
+        db.commit()
+
     return ConnectChannelResponse(
         id=str(channel.id),
         webhook_url=webhook_url,
@@ -223,14 +244,60 @@ async def send_telegram_message(bot_token: str, chat_id: str, text: str):
     Send message via Telegram Bot API.
     """
     import httpx
-    
+
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    
+
     async with httpx.AsyncClient() as client:
         response = await client.post(url, json={
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "HTML"
         })
-        
+
         return response.json()
+
+
+async def verify_telegram_bot(bot_token: str) -> dict:
+    """
+    Verify bot token via getMe API.
+    Returns bot info if valid, raises exception if invalid.
+    """
+    import httpx
+
+    url = f"https://api.telegram.org/bot{bot_token}/getMe"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url)
+        data = response.json()
+
+        if not data.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid bot token: {data.get('description', 'Unknown error')}"
+            )
+
+        return data.get("result")
+
+
+async def set_telegram_webhook(bot_token: str, webhook_url: str) -> bool:
+    """
+    Set webhook for Telegram bot.
+    """
+    import httpx
+
+    url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json={
+            "url": webhook_url,
+            "allowed_updates": ["message"]
+        })
+        data = response.json()
+
+        if not data.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to set webhook: {data.get('description', 'Unknown error')}"
+            )
+
+        return True
