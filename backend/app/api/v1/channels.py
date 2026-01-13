@@ -121,8 +121,35 @@ async def get_agent_channels(
     channels = db.query(AgentChannel).filter(
         AgentChannel.agent_id == agent_id
     ).all()
-    
+
     return channels
+
+
+@router.delete("/{channel_id}")
+async def disconnect_channel(
+    channel_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Disconnect and delete a channel.
+    For Telegram: removes webhook from Telegram API.
+    """
+    # Get channel
+    channel = db.query(AgentChannel).filter(AgentChannel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    # For Telegram: remove webhook
+    if channel.channel_type == "telegram":
+        bot_token = channel.credentials.get("bot_token")
+        if bot_token:
+            await delete_telegram_webhook(bot_token)
+
+    # Delete channel from database
+    db.delete(channel)
+    db.commit()
+
+    return {"status": "disconnected", "channel_id": channel_id}
 
 
 @router.post("/webhook/telegram/{channel_id}")
@@ -300,3 +327,18 @@ async def set_telegram_webhook(bot_token: str, webhook_url: str) -> bool:
             )
 
         return True
+
+
+async def delete_telegram_webhook(bot_token: str) -> bool:
+    """
+    Delete webhook for Telegram bot.
+    """
+    import httpx
+
+    url = f"https://api.telegram.org/bot{bot_token}/deleteWebhook"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url)
+        data = response.json()
+
+        return data.get("ok", False)
