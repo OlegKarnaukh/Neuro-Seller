@@ -205,15 +205,14 @@ async def telegram_webhook(
     
     # Call OpenAI
     try:
-        result = await chat_completion(messages=messages, temperature=0.8)
-        response_text = result["content"]
-        
+        response_text = await chat_completion(messages=messages, temperature=0.8)
+
         # Save assistant message
         assistant_message = Message(
             conversation_id=conversation.id,
             role="assistant",
             text=response_text,
-            tokens_used=result["tokens_used"]
+            tokens_used=0
         )
         db.add(assistant_message)
         
