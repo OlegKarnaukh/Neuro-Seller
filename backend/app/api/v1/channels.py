@@ -66,15 +66,19 @@ async def connect_channel(
     if existing:
         raise HTTPException(status_code=400, detail="Channel already connected")
 
-    # For Telegram: verify bot token first
+    # Verify bot token first
     bot_info = None
     if request.channel_type == "telegram":
         bot_token = request.credentials.get("bot_token")
         if not bot_token:
             raise HTTPException(status_code=400, detail="bot_token is required for Telegram")
-
-        # Verify token is valid
         bot_info = await verify_telegram_bot(bot_token)
+
+    elif request.channel_type == "max":
+        bot_token = request.credentials.get("bot_token")
+        if not bot_token:
+            raise HTTPException(status_code=400, detail="bot_token is required for Max")
+        bot_info = await verify_max_bot(bot_token)
 
     # Create channel
     channel = AgentChannel(
@@ -95,12 +99,19 @@ async def connect_channel(
     channel.webhook_url = webhook_url
     db.commit()
 
-    # For Telegram: set webhook
+    # Set webhook based on channel type
     if request.channel_type == "telegram":
         bot_token = request.credentials.get("bot_token")
         await set_telegram_webhook(bot_token, webhook_url)
         channel.webhook_verified = True
         channel.settings = {"bot_username": bot_info.get("username"), "bot_name": bot_info.get("first_name")}
+        db.commit()
+
+    elif request.channel_type == "max":
+        bot_token = request.credentials.get("bot_token")
+        await set_max_webhook(bot_token, webhook_url)
+        channel.webhook_verified = True
+        channel.settings = {"bot_name": bot_info.get("name"), "bot_username": bot_info.get("username")}
         db.commit()
 
     return ConnectChannelResponse(
@@ -139,11 +150,13 @@ async def disconnect_channel(
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
 
-    # For Telegram: remove webhook
-    if channel.channel_type == "telegram":
-        bot_token = channel.credentials.get("bot_token")
-        if bot_token:
+    # Remove webhook based on channel type
+    bot_token = channel.credentials.get("bot_token")
+    if bot_token:
+        if channel.channel_type == "telegram":
             await delete_telegram_webhook(bot_token)
+        elif channel.channel_type == "max":
+            await delete_max_webhook(bot_token)
 
     # Delete channel from database
     db.delete(channel)
@@ -265,6 +278,125 @@ async def telegram_webhook(
         return {"ok": False, "error": str(e)}
 
 
+@router.post("/webhook/max/{channel_id}")
+async def max_webhook(
+    channel_id: str,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Webhook endpoint for Max messenger updates.
+    """
+    # Get channel
+    channel = db.query(AgentChannel).filter(AgentChannel.id == channel_id).first()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    # Get agent
+    agent = db.query(Agent).filter(Agent.id == channel.agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Parse Max update
+    update = await request.json()
+
+    # Max sends update_type to indicate event type
+    update_type = update.get("update_type")
+
+    # Handle message_created event
+    if update_type != "message_created":
+        return {"ok": True}
+
+    # Extract message data
+    message = update.get("message", {})
+    sender = message.get("sender", {})
+    user_id = str(sender.get("user_id", ""))
+    username = sender.get("username", "")
+    text = message.get("body", {}).get("text", "")
+    chat_id = str(update.get("chat_id", ""))
+
+    if not text or not chat_id:
+        return {"ok": True}
+
+    # Get or create conversation
+    conversation = db.query(Conversation).filter(
+        Conversation.agent_id == agent.id,
+        Conversation.channel_id == channel.id,
+        Conversation.external_user_id == user_id,
+        Conversation.status == "active"
+    ).first()
+
+    if not conversation:
+        conversation = Conversation(
+            agent_id=agent.id,
+            channel_id=channel.id,
+            external_user_id=user_id,
+            external_username=username,
+            status="active"
+        )
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+    # Save user message
+    user_message = Message(
+        conversation_id=conversation.id,
+        role="user",
+        text=text
+    )
+    db.add(user_message)
+
+    # Get conversation history
+    history_messages = db.query(Message).filter(
+        Message.conversation_id == conversation.id
+    ).order_by(Message.created_at).limit(20).all()
+
+    # Prepare messages for OpenAI
+    messages = [{"role": "system", "content": agent.system_prompt}]
+
+    for msg in history_messages:
+        messages.append({
+            "role": msg.role,
+            "content": msg.text
+        })
+
+    messages.append({"role": "user", "content": text})
+
+    # Call OpenAI
+    try:
+        response_text = await chat_completion(messages=messages, temperature=0.8)
+
+        # Save assistant message
+        assistant_message = Message(
+            conversation_id=conversation.id,
+            role="assistant",
+            text=response_text,
+            tokens_used=0
+        )
+        db.add(assistant_message)
+
+        # Update conversation
+        conversation.last_message_at = datetime.utcnow()
+        channel.messages_count += 1
+        channel.last_message_at = datetime.utcnow()
+
+        db.commit()
+
+        # Send response back to Max
+        await send_max_message(
+            bot_token=channel.credentials.get("bot_token"),
+            chat_id=chat_id,
+            text=response_text
+        )
+
+        return {"ok": True}
+
+    except Exception as e:
+        db.rollback()
+        print(f"❌ Error processing Max message: {e}")
+        return {"ok": False, "error": str(e)}
+
+
 async def send_telegram_message(bot_token: str, chat_id: str, text: str):
     """
     Send message via Telegram Bot API.
@@ -342,3 +474,92 @@ async def delete_telegram_webhook(bot_token: str) -> bool:
         data = response.json()
 
         return data.get("ok", False)
+
+
+# ============== MAX Bot API Functions ==============
+
+MAX_API_URL = "https://platform-api.max.ru"
+
+
+async def verify_max_bot(bot_token: str) -> dict:
+    """
+    Verify Max bot token via /me API.
+    Returns bot info if valid, raises exception if invalid.
+    """
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{MAX_API_URL}/me",
+            headers={"Authorization": bot_token}
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid Max bot token: {response.text}"
+            )
+
+        return response.json()
+
+
+async def set_max_webhook(bot_token: str, webhook_url: str) -> bool:
+    """
+    Set webhook subscription for Max bot.
+    """
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{MAX_API_URL}/subscriptions",
+            headers={
+                "Authorization": bot_token,
+                "Content-Type": "application/json"
+            },
+            json={"url": webhook_url}
+        )
+
+        if response.status_code not in [200, 201]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to set Max webhook: {response.text}"
+            )
+
+        return True
+
+
+async def delete_max_webhook(bot_token: str) -> bool:
+    """
+    Delete webhook subscription for Max bot.
+    """
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        response = await client.delete(
+            f"{MAX_API_URL}/subscriptions",
+            headers={"Authorization": bot_token}
+        )
+
+        return response.status_code in [200, 204]
+
+
+async def send_max_message(bot_token: str, chat_id: str, text: str):
+    """
+    Send message via Max Bot API.
+    """
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{MAX_API_URL}/messages",
+            headers={
+                "Authorization": bot_token,
+                "Content-Type": "application/json"
+            },
+            json={
+                "chat_id": int(chat_id),
+                "text": text
+            }
+        )
+
+        return response.json()
