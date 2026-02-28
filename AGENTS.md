@@ -27,5 +27,11 @@ Set these in `backend/.env` (loaded via `python-dotenv`):
 - `flake8 --max-line-length=120 app/ main.py` can be used for basic linting (install via `pip install flake8`).
 - The codebase has many pre-existing whitespace warnings (W291/W293) which are not blocking.
 
+### Knowledge base format
+When creating agents via `POST /api/v1/agents/create`, the `knowledge_base.services` field must be a list of objects with `name` and `price` keys (e.g. `[{"name": "...", "price": "..."}]`), not plain strings. The `generate_seller_prompt()` function in `app/prompts.py` calls `.get()` on each item.
+
+### OpenAI API
+The constructor chat (`POST /api/v1/constructor/chat`) and agent testing (`POST /api/v1/agents/test`) endpoints require a valid OpenAI API key with active billing. Non-AI endpoints (user CRUD, agent CRUD, health checks) work with any placeholder key.
+
 ### PATH note
 User-installed pip binaries are in `~/.local/bin`. This is added to PATH in `~/.bashrc`.
